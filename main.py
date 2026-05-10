@@ -6,90 +6,86 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, ConversationHandler,
+)
 from report_generator import generate_pdf_report, load_analysis_history
+from calculation_engine import (
+    calculate_all, validate_inputs, VALID_STORE_TYPES,
+    get_store_benchmark, lever_status,
+)
+from formatting_engine import (
+    fmt_currency, fmt_pct_from_decimal, fmt_profit_impact,
+    lever_status_label,
+)
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+)
 
 # ====================== CONVERSATION STATES ======================
 (
     TIMEFRAME,
+    STORE_TYPE,
     CUSTOMERS,
     FREQUENCY,
     AVG_SPEND,
-    GROSS_MARGIN,
-    COGS,
-    NET_PROFIT,
+    GST_CONFIRM,
+    COGS_PCT,
+    LABOUR_PCT,
+    OCCUPANCY_PCT,
+    MARKETING_PCT,
+    OTHER_CODB_PCT,
     CHALLENGES,
     DIAGNOSTIC,
     UPLOAD,
     BUSINESS_NAME,
     PDF_CONFIRM,
-) = range(12)
+) = range(16)
 
-# ====================== LEVER ANALYSIS ENGINE ======================
+# ====================== STORE TYPE KEYBOARD ======================
 
-def calculate_lever_scores(data: dict) -> dict:
-    """
-    Normalise each of the four Retail DNA levers to a 0-100 score.
+STORE_TYPE_KEYBOARD = [
+    ['grocery', 'cafe', 'pharmacy'],
+    ['liquor', 'specialty', 'gift'],
+    ['hardware', 'other'],
+]
 
-    Benchmarks (weekly):
-      Customer Base  – 500 customers = 100
-      Frequency      – 3+ visits/period = 100
-      Transaction    – $100 avg spend = 100
-      Margin         – 50% gross margin = 100
-    """
-    customers   = data.get('customers', 0)
-    frequency   = data.get('frequency', 0)
-    avg_spend   = data.get('avg_spend', 0)
-    gross_margin = data.get('gross_margin', 0)
-
-    scores = {
-        'Customer Base':      min(100, round((customers   / 500)  * 100, 1)),
-        'Frequency':          min(100, round((frequency   / 3)    * 100, 1)),
-        'Transaction Value':  min(100, round((avg_spend   / 100)  * 100, 1)),
-        'Margin':             min(100, round((gross_margin / 50)  * 100, 1)),
-    }
-    return scores
-
-
-def identify_bottleneck(scores: dict) -> str:
-    """Return the lever name with the lowest score."""
-    return min(scores, key=scores.get)
-
+# ====================== DIAGNOSTIC QUESTIONS ======================
 
 def get_diagnostic_questions(bottleneck: str) -> str:
-    """Return targeted diagnostic questions for the weakest lever."""
     questions = {
         'Customer Base': (
-            "🔎 *Diagnosing: Customer Base*\n\n"
+            "*Diagnosing: Customer Base*\n\n"
             "To understand your acquisition challenge, please answer:\n\n"
-            "1️⃣ What is your *point of difference* vs competitors?\n"
-            "2️⃣ How do you currently *acquire new customers*? "
+            "1. What is your *point of difference* vs competitors?\n"
+            "2. How do you currently *acquire new customers*? "
             "(e.g. word of mouth, social media, flyers, none)\n\n"
             "Type your answers and press Send."
         ),
         'Frequency': (
-            "🔎 *Diagnosing: Customer Frequency*\n\n"
+            "*Diagnosing: Customer Frequency*\n\n"
             "To understand your loyalty challenge, please answer:\n\n"
-            "1️⃣ Which *categories* drive the most repeat visits?\n"
-            "2️⃣ Do you have a *loyalty or rewards program*? "
-            "(yes / no — if yes, what type?)\n\n"
+            "1. Which *categories* drive the most repeat visits?\n"
+            "2. Do you have a *loyalty or rewards program*? "
+            "(yes / no - if yes, what type?)\n\n"
             "Type your answers and press Send."
         ),
         'Transaction Value': (
-            "🔎 *Diagnosing: Transaction Value*\n\n"
+            "*Diagnosing: Transaction Value*\n\n"
             "To understand your basket-size challenge, please answer:\n\n"
-            "1️⃣ How many *items* does the average customer buy per visit?\n"
-            "2️⃣ Do your staff actively *cross-sell or upsell*? "
-            "(yes / no — if yes, how?)\n\n"
+            "1. How many *items* does the average customer buy per visit?\n"
+            "2. Do your staff actively *cross-sell or upsell*? "
+            "(yes / no - if yes, how?)\n\n"
             "Type your answers and press Send."
         ),
         'Margin': (
-            "🔎 *Diagnosing: Margins (COGS & CODB)*\n\n"
+            "*Diagnosing: Margins (COGS & CODB)*\n\n"
             "To understand your margin challenge, please answer:\n\n"
-            "1️⃣ Have you *negotiated with suppliers* in the last 12 months?\n"
-            "2️⃣ What is your biggest *Cost of Doing Business (CODB)* line item? "
+            "1. Have you *negotiated with suppliers* in the last 12 months?\n"
+            "2. What is your biggest *Cost of Doing Business (CODB)* line item? "
             "(e.g. rent, wages, utilities)\n\n"
             "Type your answers and press Send."
         ),
@@ -97,177 +93,84 @@ def get_diagnostic_questions(bottleneck: str) -> str:
     return questions.get(bottleneck, "Tell me more about your biggest challenge.")
 
 
-def get_lever_recommendations(bottleneck: str, data: dict) -> str:
-    """Return actionable strategies mapped to the weakest lever."""
+def get_lever_recommendations(bottleneck: str) -> str:
     recs = {
         'Customer Base': (
-            "📌 *Strategies to Grow Your Customer Base*\n\n"
-            "• *Expand your range* — stock products that attract new shopper segments\n"
-            "• *Sharpen your point of difference* — be known for something specific "
-            "(price, range, service, convenience)\n"
-            "• *Run targeted marketing* — geo-targeted social ads, letterbox drops, "
-            "Google Business profile optimisation\n"
-            "• *Referral incentives* — reward existing customers for bringing friends\n"
-            "• *Community presence* — sponsor local events, partner with complementary businesses"
+            "*Strategies to Grow Your Customer Base*\n\n"
+            "- *Expand your range* - stock products that attract new shopper segments\n"
+            "- *Sharpen your point of difference* - be known for something specific\n"
+            "- *Run targeted marketing* - geo-targeted social ads, Google Business profile\n"
+            "- *Referral incentives* - reward existing customers for bringing friends\n"
+            "- *Community presence* - sponsor local events, partner with complementary businesses"
         ),
         'Frequency': (
-            "📌 *Strategies to Improve Customer Frequency*\n\n"
-            "• *Implement a loyalty program* — even a simple stamp card lifts repeat visits\n"
-            "• *Create in-store theatre* — seasonal displays, tastings, demos that give "
-            "customers a reason to return\n"
-            "• *Focus on FOP (Front of Pack) categories* — stock the everyday essentials "
-            "that drive habitual visits\n"
-            "• *Subscription or auto-replenishment* — lock in regular purchases\n"
-            "• *Personalised outreach* — SMS/email reminders when customers haven't visited"
+            "*Strategies to Improve Customer Frequency*\n\n"
+            "- *Implement a loyalty program* - even a simple stamp card lifts repeat visits\n"
+            "- *Create in-store theatre* - seasonal displays, tastings, demos\n"
+            "- *Focus on FOP categories* - stock everyday essentials that drive habitual visits\n"
+            "- *Subscription or auto-replenishment* - lock in regular purchases\n"
+            "- *Personalised outreach* - SMS/email reminders when customers haven't visited"
         ),
         'Transaction Value': (
-            "📌 *Strategies to Grow Transaction Value*\n\n"
-            "• *Improve merchandising* — place complementary products together to trigger "
-            "add-on purchases\n"
-            "• *Train staff to cross-sell* — suggest one related item at point of sale\n"
-            "• *Add a premium range* — trade customers up with a higher-margin option\n"
-            "• *Bundle deals* — 'buy 2 get 10% off' increases items per basket\n"
-            "• *Minimum spend thresholds* — 'spend $50, get free delivery' lifts average ticket"
+            "*Strategies to Grow Transaction Value*\n\n"
+            "- *Improve merchandising* - place complementary products together\n"
+            "- *Train staff to cross-sell* - suggest one related item at point of sale\n"
+            "- *Add a premium range* - trade customers up with a higher-margin option\n"
+            "- *Bundle deals* - 'buy 2 get 10% off' increases items per basket\n"
+            "- *Minimum spend thresholds* - 'spend $50, get free delivery' lifts average ticket"
         ),
         'Margin': (
-            "📌 *Strategies to Improve Margins*\n\n"
-            "• *Negotiate supplier deals* — volume commitments, early payment discounts, "
-            "rebate structures\n"
-            "• *Reduce CODB* — audit rent, wages scheduling, energy costs; small cuts "
-            "compound quickly\n"
-            "• *Improve operational efficiency* — reduce waste, shrinkage, and overordering\n"
-            "• *Rationalise the range* — cut slow-moving SKUs that tie up cash and space\n"
-            "• *Premiumise* — shift mix toward higher-margin products and own-label lines"
+            "*Strategies to Improve Margins*\n\n"
+            "- *Negotiate supplier deals* - volume commitments, early payment discounts\n"
+            "- *Reduce CODB* - audit rent, wages scheduling, energy costs\n"
+            "- *Improve operational efficiency* - reduce waste, shrinkage, and overordering\n"
+            "- *Rationalise the range* - cut slow-moving SKUs that tie up cash and space\n"
+            "- *Premiumise* - shift mix toward higher-margin products and own-label lines"
         ),
     }
     return recs.get(bottleneck, "Focus on the lever with the most room for improvement.")
 
 
-def calculate_profit_impact(data: dict, scores: dict, bottleneck: str) -> str:
-    """
-    Show the dollar impact of a 10 % improvement in the bottleneck lever.
-    Profit = customers × frequency × avg_spend × net_profit_margin
-    """
-    customers    = data.get('customers', 0)
-    frequency    = data.get('frequency', 1)
-    avg_spend    = data.get('avg_spend', 0)
-    net_margin   = data.get('net_profit', 4) / 100
-    tf           = data.get('timeframe', 'weekly')
-
-    # Annualise
-    multiplier = {'weekly': 52, 'monthly': 12, 'yearly': 1}.get(tf, 52)
-    base_profit = customers * frequency * avg_spend * net_margin * multiplier
-
-    improvement = 0.10  # 10 % lift
-
-    if bottleneck == 'Customer Base':
-        new_profit = (customers * 1.10) * frequency * avg_spend * net_margin * multiplier
-        lever_detail = (
-            f"Adding {customers * improvement:,.0f} customers "
-            f"({customers:,.0f} → {customers * 1.10:,.0f})"
-        )
-    elif bottleneck == 'Frequency':
-        new_profit = customers * (frequency * 1.10) * avg_spend * net_margin * multiplier
-        lever_detail = (
-            f"Frequency {frequency:.1f} → {frequency * 1.10:.2f} visits/period"
-        )
-    elif bottleneck == 'Transaction Value':
-        new_profit = customers * frequency * (avg_spend * 1.10) * net_margin * multiplier
-        lever_detail = (
-            f"Avg spend ${avg_spend:.2f} → ${avg_spend * 1.10:.2f}/visit"
-        )
-    else:  # Margin
-        new_margin = (data.get('net_profit', 4) * 1.10) / 100
-        new_profit = customers * frequency * avg_spend * new_margin * multiplier
-        lever_detail = (
-            f"Net margin {data.get('net_profit', 4):.1f}% → "
-            f"{data.get('net_profit', 4) * 1.10:.2f}%"
-        )
-
-    profit_gain = new_profit - base_profit
-    pct_gain    = ((new_profit / base_profit) - 1) * 100 if base_profit else 0
-
-    return (
-        f"💡 *Impact of a 10% improvement in {bottleneck}*\n"
-        f"{lever_detail}\n"
-        f"Annual profit: ${base_profit:,.0f} → ${new_profit:,.0f} "
-        f"(+${profit_gain:,.0f} / +{pct_gain:.1f}%)"
-    )
-
-
 def build_lever_score_bar(scores: dict) -> str:
-    """Build a simple text progress-bar representation of lever scores."""
     lines = []
     for lever, score in scores.items():
-        filled = int(score / 10)          # 0-10 blocks
+        filled = int(score / 10)
         empty  = 10 - filled
         bar    = "█" * filled + "░" * empty
-        lines.append(f"{lever:<18} [{bar}] {score:.0f}/100")
+        status = lever_status_label(score)
+        lines.append(f"{lever:<18} [{bar}] {score:.0f}/100  {status}")
     return "\n".join(lines)
 
 
 # ====================== CHART GENERATORS ======================
 
-def _save_profit_chart(data: dict, chat_id: int) -> str:
-    tf           = data.get('timeframe', 'weekly')
-    multiplier   = {'weekly': 52, 'monthly': 12, 'yearly': 1}.get(tf, 52)
-    weekly_sales = data.get('customers', 0) * data.get('frequency', 0) * data.get('avg_spend', 0)
-    annual_sales = weekly_sales * multiplier
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    categories = ['Revenue', 'COGS', 'Gross Profit', 'Net Profit']
-    values = [
-        annual_sales,
-        annual_sales * (data.get('cogs', 70) / 100),
-        annual_sales * (data.get('gross_margin', 30) / 100),
-        annual_sales * (data.get('net_profit', 4) / 100),
-    ]
-    colors = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e']
-    bars = ax.bar(categories, values, color=colors, edgecolor='white', linewidth=0.8)
-    ax.set_title(f'Annual Profit Breakdown  ({tf.capitalize()} data extrapolated)', fontsize=13, fontweight='bold')
-    ax.set_ylabel('Dollars ($)', fontsize=11)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
-    for bar, val in zip(bars, values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() * 0.92,
-            f'${val:,.0f}',
-            ha='center', va='top', color='white', fontsize=9, fontweight='bold'
-        )
-    plt.tight_layout()
-    path = f"chart_profit_{chat_id}.png"
-    plt.savefig(path, dpi=120)
-    plt.close()
-    return path
-
-
-def _save_lever_chart(scores: dict, bottleneck: str, chat_id: int) -> str:
+def _save_lever_chart(scores: dict, bottleneck: str,
+                      store_type: str, chat_id: int) -> str:
     levers = list(scores.keys())
     values = [scores[l] for l in levers]
-    colors = ['#d62728' if l == bottleneck else '#2ca02c' for l in levers]
+    colors = ['#D62839' if l == bottleneck else '#1B998B' for l in levers]
 
     fig, ax = plt.subplots(figsize=(8, 5))
     bars = ax.barh(levers, values, color=colors, edgecolor='white', linewidth=0.8)
     ax.set_xlim(0, 110)
-    ax.set_xlabel('Score (0 – 100)', fontsize=11)
-    ax.set_title('Retail DNA — Lever Scores', fontsize=13, fontweight='bold')
+    ax.set_xlabel('Score (0 - 100)', fontsize=11)
+    ax.set_title(f'Retail DNA - Lever Scores ({store_type.title()} store)',
+                 fontsize=13, fontweight='bold')
 
     for bar, val in zip(bars, values):
-        ax.text(
-            val + 1.5,
-            bar.get_y() + bar.get_height() / 2,
-            f'{val:.0f}',
-            va='center', fontsize=10, fontweight='bold'
-        )
+        ax.text(val + 1.5, bar.get_y() + bar.get_height() / 2,
+                f'{val:.0f}', va='center', fontsize=10, fontweight='bold')
 
-    # Legend
+    for x, label, col in [(50, 'MONITOR', '#E67E22'), (70, 'GOOD', '#FFBC42'),
+                           (90, 'HEALTHY', '#27AE60')]:
+        ax.axvline(x=x, color=col, linestyle='--', linewidth=1)
+        ax.text(x + 0.5, -0.5, label, color=col, fontsize=8)
+
     legend_handles = [
-        mpatches.Patch(color='#d62728', label='Bottleneck lever'),
-        mpatches.Patch(color='#2ca02c', label='Other levers'),
+        mpatches.Patch(color='#D62839', label='Bottleneck lever'),
+        mpatches.Patch(color='#1B998B', label='Other levers'),
     ]
     ax.legend(handles=legend_handles, loc='lower right', fontsize=9)
-    ax.axvline(x=70, color='#ff7f0e', linestyle='--', linewidth=1, label='Target (70)')
-    ax.text(71, -0.5, 'Target', color='#ff7f0e', fontsize=8)
 
     plt.tight_layout()
     path = f"chart_levers_{chat_id}.png"
@@ -280,40 +183,42 @@ def _save_lever_chart(scores: dict, bottleneck: str, chat_id: int) -> str:
 
 async def set_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['timeframe'] = 'weekly'
-    await update.message.reply_text("⏱️ Timeframe set to *Weekly*.\n\nStarting fresh diagnostic…", parse_mode='Markdown')
-    return await start_diagnostic(update, context)
+    await update.message.reply_text(
+        "Timeframe set to *Weekly*.\n\nStarting fresh diagnostic...",
+        parse_mode='Markdown')
+    return await ask_store_type(update, context)
 
 async def set_monthly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['timeframe'] = 'monthly'
-    await update.message.reply_text("⏱️ Timeframe set to *Monthly*.\n\nStarting fresh diagnostic…", parse_mode='Markdown')
-    return await start_diagnostic(update, context)
+    await update.message.reply_text(
+        "Timeframe set to *Monthly*.\n\nStarting fresh diagnostic...",
+        parse_mode='Markdown')
+    return await ask_store_type(update, context)
 
 async def set_yearly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['timeframe'] = 'yearly'
-    await update.message.reply_text("⏱️ Timeframe set to *Yearly*.\n\nStarting fresh diagnostic…", parse_mode='Markdown')
-    return await start_diagnostic(update, context)
+    await update.message.reply_text(
+        "Timeframe set to *Yearly*.\n\nStarting fresh diagnostic...",
+        parse_mode='Markdown')
+    return await ask_store_type(update, context)
+
 
 # ====================== MAIN DIAGNOSTIC FLOW ======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
-        "👋 Welcome to *Retail DNA Bot*!\n\n"
-        "I'll help you identify which profit lever to pull for maximum impact.\n\n"
-        "Use /week, /month, or /year to set your timeframe, or just tell me now:\n"
-        "What is the *timeframe* of your data? (weekly / monthly / yearly)",
+        "*Welcome to Retail DNA Bot!*\n\n"
+        "I'll run a precise, auditable diagnostic of your retail business "
+        "using the ieRetail framework.\n\n"
+        "All calculations use exact formulas - no approximations.\n"
+        "All prices should be *GST-exclusive* (NZ context).\n\n"
+        "What is the *timeframe* of your data?\n"
+        "Reply: *weekly*, *monthly*, or *yearly*",
         parse_mode='Markdown'
     )
     return TIMEFRAME
 
-async def start_diagnostic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tf = context.user_data.get('timeframe', 'weekly')
-    await update.message.reply_text(
-        f"Starting *{tf.capitalize()}* diagnostic.\n\n"
-        f"How many *unique customers* visited in that period?",
-        parse_mode='Markdown'
-    )
-    return CUSTOMERS
 
 async def timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tf = update.message.text.lower().strip()
@@ -324,98 +229,312 @@ async def timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif tf.startswith('week'):
         context.user_data['timeframe'] = 'weekly'
     else:
-        await update.message.reply_text("Please reply with: *weekly*, *monthly*, or *yearly*", parse_mode='Markdown')
+        await update.message.reply_text(
+            "Please reply with: *weekly*, *monthly*, or *yearly*",
+            parse_mode='Markdown')
         return TIMEFRAME
-    return await start_diagnostic(update, context)
+    return await ask_store_type(update, context)
+
+
+async def ask_store_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "What *type of store* do you operate?\n\n"
+        "This determines the avg spend benchmark used to score your "
+        "Transaction Value lever.\n\n"
+        "Benchmarks (GST-exclusive avg spend):\n"
+        "- grocery: $45\n"
+        "- cafe: $22\n"
+        "- pharmacy: $55\n"
+        "- liquor: $65\n"
+        "- specialty: $80\n"
+        "- gift: $70\n"
+        "- hardware: $90\n"
+        "- other: $50\n\n"
+        "Select your store type:",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardMarkup(
+            STORE_TYPE_KEYBOARD, one_time_keyboard=True, resize_keyboard=True
+        ),
+    )
+    return STORE_TYPE
+
+
+async def store_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = update.message.text.lower().strip()
+    if st not in VALID_STORE_TYPES:
+        await update.message.reply_text(
+            f"Please choose one of: {', '.join(VALID_STORE_TYPES)}",
+            reply_markup=ReplyKeyboardMarkup(
+                STORE_TYPE_KEYBOARD, one_time_keyboard=True, resize_keyboard=True
+            ),
+        )
+        return STORE_TYPE
+    context.user_data['store_type'] = st
+    tf = context.user_data.get('timeframe', 'weekly')
+    await update.message.reply_text(
+        f"Store type: *{st.title()}*  |  Timeframe: *{tf.capitalize()}*\n\n"
+        f"How many *unique customers* visited in that {tf} period?",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return CUSTOMERS
+
 
 async def customers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        context.user_data['customers'] = int(float(update.message.text.replace(',', '')))
+        val = int(float(update.message.text.replace(',', '')))
+        if val <= 0:
+            raise ValueError
+        context.user_data['customers'] = val
     except ValueError:
-        await update.message.reply_text("Please enter a whole number (e.g. 350).")
+        await update.message.reply_text("Please enter a positive whole number (e.g. 350).")
         return CUSTOMERS
     await update.message.reply_text(
-        "Average *visits per customer* in that period?\n_(e.g. 1.5 for weekly, 4 for monthly)_",
+        "Average *visits per customer* in that period?\n"
+        "_(e.g. 1.5 for weekly, 4 for monthly)_",
         parse_mode='Markdown'
     )
     return FREQUENCY
 
+
 async def frequency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        context.user_data['frequency'] = float(update.message.text)
+        val = float(update.message.text)
+        if val <= 0:
+            raise ValueError
+        context.user_data['frequency'] = val
     except ValueError:
-        await update.message.reply_text("Please enter a number (e.g. 2.5).")
+        await update.message.reply_text("Please enter a positive number (e.g. 2.5).")
         return FREQUENCY
-    await update.message.reply_text("Average *spend per visit* ($)?", parse_mode='Markdown')
+    await update.message.reply_text(
+        "Average *spend per visit* ($)?\n"
+        "_(Enter GST-exclusive price, e.g. 43.50)_",
+        parse_mode='Markdown'
+    )
     return AVG_SPEND
+
 
 async def avg_spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        context.user_data['avg_spend'] = float(update.message.text.replace('$', '').replace(',', ''))
+        val = float(update.message.text.replace('$', '').replace(',', ''))
+        if val <= 0:
+            raise ValueError
+        context.user_data['avg_spend'] = val
     except ValueError:
-        await update.message.reply_text("Please enter a dollar amount (e.g. 45.50).")
+        await update.message.reply_text(
+            "Please enter a positive dollar amount (e.g. 43.50).")
         return AVG_SPEND
-    await update.message.reply_text("Current *Gross Margin %*?\n_(Revenue minus COGS, as a percentage)_", parse_mode='Markdown')
-    return GROSS_MARGIN
-
-async def gross_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['gross_margin'] = float(update.message.text.replace('%', ''))
-    except ValueError:
-        await update.message.reply_text("Please enter a percentage (e.g. 32).")
-        return GROSS_MARGIN
-    await update.message.reply_text("*COGS %*?\n_(Cost of Goods Sold as a % of revenue)_", parse_mode='Markdown')
-    return COGS
-
-async def cogs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['cogs'] = float(update.message.text.replace('%', ''))
-    except ValueError:
-        await update.message.reply_text("Please enter a percentage (e.g. 68).")
-        return COGS
-    await update.message.reply_text("Approximate *Net Profit %*?\n_(After all costs)_", parse_mode='Markdown')
-    return NET_PROFIT
-
-async def net_profit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['net_profit'] = float(update.message.text.replace('%', ''))
-    except ValueError:
-        await update.message.reply_text("Please enter a percentage (e.g. 5).")
-        return NET_PROFIT
     await update.message.reply_text(
+        "Are your prices *GST-exclusive*?\n\n"
+        "_(All calculations use GST-exclusive prices. "
+        "If your avg spend includes GST, divide by 1.15 first.)_\n\n"
+        "Reply: *yes* or *no*",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardMarkup(
+            [['yes', 'no']], one_time_keyboard=True, resize_keyboard=True
+        ),
+    )
+    return GST_CONFIRM
+
+
+async def gst_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower().strip()
+    if text in ('yes', 'y'):
+        context.user_data['gst_exclusive'] = True
+    elif text in ('no', 'n'):
+        context.user_data['gst_exclusive'] = False
+        # Auto-adjust avg_spend to GST-exclusive
+        gst_inclusive = context.user_data.get('avg_spend', 0)
+        context.user_data['avg_spend'] = round(gst_inclusive / 1.15, 2)
+        await update.message.reply_text(
+            f"Noted. Avg spend adjusted to GST-exclusive: "
+            f"*${context.user_data['avg_spend']:.2f}*\n"
+            f"_(${gst_inclusive:.2f} / 1.15)_",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    else:
+        await update.message.reply_text(
+            "Please reply *yes* or *no*.",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardMarkup(
+                [['yes', 'no']], one_time_keyboard=True, resize_keyboard=True
+            ),
+        )
+        return GST_CONFIRM
+
+    await update.message.reply_text(
+        "*COGS %* (Cost of Goods Sold as a % of revenue)?\n"
+        "_(e.g. 59 for 59%. Typical range: 40-80%)_",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return COGS_PCT
+
+
+async def cogs_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        val = float(update.message.text.replace('%', ''))
+        if not (0 < val < 100):
+            raise ValueError
+        context.user_data['cogs_pct'] = val
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a percentage between 0 and 100 (e.g. 59).")
+        return COGS_PCT
+    gm = 100 - val
+    await update.message.reply_text(
+        f"COGS: *{val:.1f}%*  |  Gross Margin: *{gm:.1f}%*\n\n"
+        "Now let's break down your *Cost of Doing Business (CODB)*.\n\n"
+        "*Labour cost %* (wages as a % of revenue)?\n"
+        "_(e.g. 15 for 15%. Typical range: 10-25%)_",
+        parse_mode='Markdown'
+    )
+    return LABOUR_PCT
+
+
+async def labour_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        val = float(update.message.text.replace('%', ''))
+        if not (0 <= val <= 100):
+            raise ValueError
+        context.user_data['labour_pct'] = val
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a percentage between 0 and 100 (e.g. 15).")
+        return LABOUR_PCT
+    await update.message.reply_text(
+        f"Labour: *{val:.1f}%*\n\n"
+        "*Occupancy cost %* (rent, rates, utilities as a % of revenue)?\n"
+        "_(e.g. 8 for 8%. Typical range: 5-15%)_",
+        parse_mode='Markdown'
+    )
+    return OCCUPANCY_PCT
+
+
+async def occupancy_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        val = float(update.message.text.replace('%', ''))
+        if not (0 <= val <= 100):
+            raise ValueError
+        context.user_data['occupancy_pct'] = val
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a percentage between 0 and 100 (e.g. 8).")
+        return OCCUPANCY_PCT
+    await update.message.reply_text(
+        f"Occupancy: *{val:.1f}%*\n\n"
+        "*Marketing cost %* (advertising, promotions as a % of revenue)?\n"
+        "_(e.g. 2 for 2%. Typical range: 1-5%)_",
+        parse_mode='Markdown'
+    )
+    return MARKETING_PCT
+
+
+async def marketing_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        val = float(update.message.text.replace('%', ''))
+        if not (0 <= val <= 100):
+            raise ValueError
+        context.user_data['marketing_pct'] = val
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a percentage between 0 and 100 (e.g. 2).")
+        return MARKETING_PCT
+    await update.message.reply_text(
+        f"Marketing: *{val:.1f}%*\n\n"
+        "*Other CODB %* (all other operating costs as a % of revenue)?\n"
+        "_(e.g. 3 for 3%. Includes admin, insurance, depreciation, etc.)_",
+        parse_mode='Markdown'
+    )
+    return OTHER_CODB_PCT
+
+
+async def other_codb_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        val = float(update.message.text.replace('%', ''))
+        if not (0 <= val <= 100):
+            raise ValueError
+        context.user_data['other_codb_pct'] = val
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a percentage between 0 and 100 (e.g. 3).")
+        return OTHER_CODB_PCT
+
+    # Show CODB summary
+    labour    = context.user_data.get('labour_pct', 0)
+    occupancy = context.user_data.get('occupancy_pct', 0)
+    marketing = context.user_data.get('marketing_pct', 0)
+    other     = val
+    total     = labour + occupancy + marketing + other
+    cogs      = context.user_data.get('cogs_pct', 0)
+    gm        = 100 - cogs
+    net_est   = gm - total
+
+    await update.message.reply_text(
+        f"*CODB Summary:*\n"
+        f"Labour:    {labour:.1f}%\n"
+        f"Occupancy: {occupancy:.1f}%\n"
+        f"Marketing: {marketing:.1f}%\n"
+        f"Other:     {other:.1f}%\n"
+        f"Total CODB: *{total:.1f}%*\n\n"
+        f"Gross Margin: {gm:.1f}%\n"
+        f"Est. Net Margin: *{net_est:.1f}%*\n\n"
         "What is your *biggest challenge* right now?\n"
-        "_(e.g. not enough customers, low repeat visits, thin margins…)_",
+        "_(e.g. not enough customers, low repeat visits, thin margins...)_",
         parse_mode='Markdown'
     )
     return CHALLENGES
 
+
 async def challenges(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['challenges'] = update.message.text
 
-    # --- Calculate lever scores and identify bottleneck ---
-    scores      = calculate_lever_scores(context.user_data)
-    bottleneck  = identify_bottleneck(scores)
-    context.user_data['lever_scores'] = scores
-    context.user_data['bottleneck']   = bottleneck
+    # Validate inputs before calculating
+    errors = validate_inputs(context.user_data)
+    if errors:
+        error_text = "\n".join(f"- {e}" for e in errors)
+        await update.message.reply_text(
+            f"There are some issues with your inputs:\n\n{error_text}\n\n"
+            "Please use /start to begin again.",
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
 
-    # --- Ask targeted diagnostic questions for the weakest lever ---
+    # Run calculation engine
+    try:
+        calc = calculate_all(context.user_data)
+    except Exception as e:
+        logging.error(f"Calculation error: {e}")
+        await update.message.reply_text(
+            f"Calculation error: {str(e)}\n\nPlease use /start to begin again."
+        )
+        return ConversationHandler.END
+
+    scores     = calc['scores']
+    bottleneck = calc['bottleneck']
+    context.user_data['_calc'] = calc
+
     diag_q = get_diagnostic_questions(bottleneck)
     await update.message.reply_text(
-        f"✅ *Basic DNA collected!*\n\n"
-        f"Your weakest lever appears to be *{bottleneck}* — let's dig deeper.\n\n"
+        f"*Basic DNA collected!*\n\n"
+        f"Your weakest lever appears to be *{bottleneck}* "
+        f"(score: {scores[bottleneck]:.0f}/100) - let's dig deeper.\n\n"
         + diag_q,
         parse_mode='Markdown'
     )
     return DIAGNOSTIC
 
+
 async def diagnostic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['diagnostic_answers'] = update.message.text
     await update.message.reply_text(
-        "📁 Upload your sales data / P&L (Excel or CSV) for deeper analysis + charts, "
+        "Upload your sales data / P&L (Excel or CSV) for deeper analysis + charts, "
         "or type `skip` to proceed with the data you've entered.",
         parse_mode='Markdown'
     )
     return UPLOAD
+
 
 async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.document:
@@ -425,114 +544,129 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             df = pd.read_excel(file_path) if file_path.endswith('.xlsx') else pd.read_csv(file_path)
             context.user_data['df'] = df
-            await update.message.reply_text(f"✅ File loaded! ({len(df)} rows)")
+            await update.message.reply_text(f"File loaded! ({len(df)} rows)")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error reading file: {str(e)}")
+            await update.message.reply_text(f"Error reading file: {str(e)}")
     return await generate_analysis(update, context)
+
 
 async def skip_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.lower().strip() == 'skip':
         return await generate_analysis(update, context)
-    await update.message.reply_text("Type `skip` to continue without a file, or attach an Excel/CSV.", parse_mode='Markdown')
+    await update.message.reply_text(
+        "Type `skip` to continue without a file, or attach an Excel/CSV.",
+        parse_mode='Markdown')
     return UPLOAD
+
 
 # ====================== ANALYSIS OUTPUT ======================
 
 async def generate_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data        = context.user_data
-    tf          = data.get('timeframe', 'weekly')
-    multiplier  = {'weekly': 52, 'monthly': 12, 'yearly': 1}.get(tf, 52)
+    data = context.user_data
 
-    customers_n = data.get('customers', 0)
-    freq        = data.get('frequency', 0)
-    spend       = data.get('avg_spend', 0)
-    gm          = data.get('gross_margin', 0)
-    cogs_pct    = data.get('cogs', 0)
-    np_pct      = data.get('net_profit', 0)
+    # Use cached calc or recompute
+    calc = data.get('_calc')
+    if calc is None:
+        errors = validate_inputs(data)
+        if errors:
+            error_text = "\n".join(f"- {e}" for e in errors)
+            await update.message.reply_text(
+                f"Validation errors:\n\n{error_text}\n\nUse /start to begin again.")
+            return ConversationHandler.END
+        try:
+            calc = calculate_all(data)
+        except Exception as e:
+            await update.message.reply_text(f"Calculation error: {str(e)}")
+            return ConversationHandler.END
 
-    period_sales = customers_n * freq * spend
-    annual_sales = period_sales * multiplier
-    annual_profit = annual_sales * (np_pct / 100)
+    pnl        = calc['pnl']
+    scores     = calc['scores']
+    bottleneck = calc['bottleneck']
+    store_type = calc['store_type']
+    inp        = calc['inputs']
+    chat_id    = update.message.chat_id
 
-    scores     = data.get('lever_scores') or calculate_lever_scores(data)
-    bottleneck = data.get('bottleneck')   or identify_bottleneck(scores)
-
-    chat_id = update.message.chat_id
-
-    # --- Chart 1: Profit Breakdown ---
+    # Chart: Lever Scores
     try:
-        profit_chart = _save_profit_chart(data, chat_id)
-        await update.message.reply_photo(
-            open(profit_chart, 'rb'),
-            caption="📊 Chart 1 of 2 — Annual Profit Breakdown"
-        )
-    except Exception as e:
-        logging.warning(f"Profit chart failed: {e}")
-
-    # --- Chart 2: Lever Scores ---
-    try:
-        lever_chart = _save_lever_chart(scores, bottleneck, chat_id)
+        lever_chart = _save_lever_chart(scores, bottleneck, store_type, chat_id)
         await update.message.reply_photo(
             open(lever_chart, 'rb'),
-            caption="📊 Chart 2 of 2 — Retail DNA Lever Scores (red = bottleneck)"
+            caption=f"Retail DNA Lever Scores ({store_type.title()} store) - red = bottleneck"
         )
+        try:
+            os.remove(lever_chart)
+        except Exception:
+            pass
     except Exception as e:
         logging.warning(f"Lever chart failed: {e}")
 
-    # --- Lever score text bars ---
+    # Lever score text bars
     score_bars = build_lever_score_bar(scores)
 
-    # --- Bottleneck explanation ---
-    bottleneck_explanations = {
-        'Customer Base':     "You don't have enough customers flowing through the door. Every other lever is limited by this ceiling.",
-        'Frequency':         "Your existing customers aren't coming back often enough. Loyalty and repeat-visit strategies will move the needle fastest.",
-        'Transaction Value': "Customers are visiting but spending too little per trip. Basket-building tactics will unlock significant revenue.",
-        'Margin':            "Your cost structure is eroding profit. Even small improvements to COGS or CODB will have an outsized impact on the bottom line.",
+    # Bottleneck explanations
+    bn_explanations = {
+        'Customer Base':
+            "You don't have enough customers flowing through the door. "
+            "Every other lever is limited by this ceiling.",
+        'Frequency':
+            "Your existing customers aren't coming back often enough. "
+            "Loyalty and repeat-visit strategies will move the needle fastest.",
+        'Transaction Value':
+            "Customers are visiting but spending too little per trip. "
+            "Basket-building tactics will unlock significant revenue.",
+        'Margin':
+            "Your cost structure is eroding profit. Even small improvements "
+            "to COGS or CODB will have an outsized impact on the bottom line.",
     }
-    bottleneck_explanation = bottleneck_explanations.get(bottleneck, "")
 
-    # --- Recommendations ---
-    recommendations = get_lever_recommendations(bottleneck, data)
+    # Top scenario (highest profit impact)
+    top_scenario = calc['scenarios'][0] if calc['scenarios'] else None
+    scenario_text = ''
+    if top_scenario:
+        scenario_text = (
+            f"\n*Top Opportunity: {top_scenario['lever']} +10%*\n"
+            f"{top_scenario['description']}\n"
+            f"Profit impact: *{fmt_profit_impact(top_scenario['profit_impact'])}*"
+        )
 
-    # --- Impact calculation ---
-    impact = calculate_profit_impact(data, scores, bottleneck)
+    # Net profit display (handle negative)
+    net_profit_val = pnl['annual_net_profit']
+    net_profit_display = fmt_currency(net_profit_val)
+    if net_profit_val < 0:
+        net_profit_display = f"({fmt_currency(abs(net_profit_val))}) LOSS"
 
-    # --- Six key profit levers summary ---
-    six_levers = (
-        "🔑 *Six Key Profit Levers*\n"
-        "1. Customer Acquisition — grow the base\n"
-        "2. COGS Reduction — negotiate & rationalise\n"
-        "3. Expense Reduction — cut CODB\n"
-        "4. Frequency Improvement — loyalty & theatre\n"
-        "5. Basket Size — cross-sell & upsell\n"
-        "6. Trade-Up / Premiumisation — shift the mix"
-    )
-
-    # --- Main analysis message ---
+    # Main analysis message
+    tf = data.get('timeframe', 'weekly')
     analysis = (
-        f"🔍 *Retail DNA Analysis — {tf.capitalize()} View*\n"
+        f"*Retail DNA Analysis - {tf.capitalize()} View*\n"
         f"{'─' * 32}\n\n"
-        f"*📈 Financial Snapshot*\n"
-        f"Period revenue:  ${period_sales:,.0f}\n"
-        f"Annual revenue:  ${annual_sales:,.0f}\n"
-        f"Gross Margin:    {gm:.1f}%\n"
-        f"COGS:            {cogs_pct:.1f}%\n"
-        f"Net Profit:      {np_pct:.1f}%  (${annual_profit:,.0f}/yr)\n\n"
-        f"*🧬 Lever Scores*\n"
+        f"*Financial Snapshot (GST-exclusive)*\n"
+        f"Store type:      {store_type.title()}\n"
+        f"Period revenue:  {fmt_currency(calc['revenue']['weekly_revenue'])}\n"
+        f"Annual revenue:  {fmt_currency(pnl['annual_revenue'])}\n"
+        f"Gross Margin:    {fmt_pct_from_decimal(pnl['gross_margin_pct'])}\n"
+        f"COGS:            {fmt_pct_from_decimal(pnl['cogs_pct'])}\n"
+        f"Total CODB:      {fmt_pct_from_decimal(pnl['total_codb_pct'])}\n"
+        f"  Labour:        {fmt_pct_from_decimal(pnl['labour_pct'])}\n"
+        f"  Occupancy:     {fmt_pct_from_decimal(pnl['occupancy_pct'])}\n"
+        f"  Marketing:     {fmt_pct_from_decimal(pnl['marketing_pct'])}\n"
+        f"  Other:         {fmt_pct_from_decimal(pnl['other_codb_pct'])}\n"
+        f"Net Profit:      {fmt_pct_from_decimal(pnl['net_margin_pct'])}  "
+        f"({net_profit_display}/yr)\n\n"
+        f"*Lever Scores*\n"
         f"```\n{score_bars}\n```\n\n"
-        f"*🚨 Bottleneck: {bottleneck}* (score: {scores[bottleneck]:.0f}/100)\n"
-        f"{bottleneck_explanation}\n\n"
-        f"{impact}\n\n"
-        f"{recommendations}\n\n"
+        f"*Bottleneck: {bottleneck}* (score: {scores[bottleneck]:.0f}/100)\n"
+        f"{bn_explanations.get(bottleneck, '')}"
+        f"{scenario_text}\n\n"
+        f"{get_lever_recommendations(bottleneck)}\n\n"
         f"{'─' * 32}\n"
-        f"{six_levers}\n\n"
         f"_Use /week, /month, or /year to run a new analysis._"
     )
     await update.message.reply_text(analysis, parse_mode='Markdown')
 
-    # ── Prompt for business name to generate PDF ──────────────────────
+    # Prompt for business name / PDF
     await update.message.reply_text(
-        "📄 *Would you like a professional PDF report?*\n\n"
+        "*Would you like a professional PDF report?*\n\n"
         "First, what is your *business name*?\n"
         "_(Type your store name, or type `skip` to use \"Your Store\")_",
         parse_mode='Markdown',
@@ -542,19 +676,19 @@ async def generate_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def collect_business_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Collect the business name, then ask whether to generate the PDF."""
     text = update.message.text.strip()
     if text.lower() == 'skip':
         context.user_data['business_name'] = 'Your Store'
     else:
         context.user_data['business_name'] = text
 
-    reply_keyboard = [['✅ Yes, generate PDF', '❌ No thanks']]
+    reply_keyboard = [['Yes, generate PDF', 'No thanks']]
     await update.message.reply_text(
         f"Great!  Generating a report for *{context.user_data['business_name']}*.\n\n"
         "Shall I create your *10-page PDF diagnostic report* now?\n"
-        "_(It includes financial snapshot, lever analysis, scenario planning, "
-        "recommendations, 90-day action plan, projections, and more.)_",
+        "_(Includes financial snapshot with CODB breakdown, lever analysis, "
+        "scenario planning, recommendations, 90-day action plan, projections, "
+        "and a full calculation scratchpad for auditability.)_",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardMarkup(
             reply_keyboard, one_time_keyboard=True, resize_keyboard=True
@@ -564,25 +698,23 @@ async def collect_business_name(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate and send the PDF report, or gracefully decline."""
     text = update.message.text.strip()
 
-    if '❌' in text or text.lower() in ('no', 'no thanks', 'nope', 'n'):
+    if 'no' in text.lower() or text.lower() in ('no thanks', 'nope', 'n'):
         await update.message.reply_text(
-            "No problem! Your inline analysis is above. 📊\n\n"
+            "No problem! Your inline analysis is above.\n\n"
             "_Use /start to run a new diagnostic, or /history to view past analyses._",
             parse_mode='Markdown',
             reply_markup=ReplyKeyboardRemove(),
         )
         return ConversationHandler.END
 
-    # User wants the PDF
     business_name = context.user_data.get('business_name', 'Your Store')
     chat_id       = update.message.chat_id
 
     await update.message.reply_text(
-        "⏳ *Building your PDF report…*\n"
-        "This takes a few seconds — please wait.",
+        "*Building your PDF report...*\n"
+        "This takes a few seconds - please wait.",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -598,31 +730,29 @@ async def handle_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 document=pdf_file,
                 filename=f"RetailDNA_Report_{business_name.replace(' ', '_')}.pdf",
                 caption=(
-                    f"📋 *Retail DNA Report — {business_name}*\n\n"
-                    "Your 10-page diagnostic report is ready. It includes:\n"
-                    "• Executive summary & key metrics\n"
-                    "• Financial snapshot\n"
-                    "• Lever analysis with charts\n"
-                    "• Bottleneck deep-dive\n"
-                    "• Scenario planning (what-if analysis)\n"
-                    "• Prioritised recommendations\n"
-                    "• 90-day action plan\n"
-                    "• Financial projections\n"
-                    "• KPI tracking dashboard\n"
-                    "• Appendix & glossary\n\n"
-                    "_Share with your team or advisor, and use the tracking "
-                    "sheet to monitor progress._"
+                    f"*Retail DNA Report - {business_name}*\n\n"
+                    "Your 10-page diagnostic report includes:\n"
+                    "- Executive summary & key metrics\n"
+                    "- Financial snapshot with CODB breakdown\n"
+                    "- Lever analysis (store-type benchmarks)\n"
+                    "- Bottleneck deep-dive\n"
+                    "- Scenario planning (exact formulas)\n"
+                    "- Prioritised recommendations\n"
+                    "- 90-day action plan\n"
+                    "- Financial projections (90-day & 12-month)\n"
+                    "- KPI tracking dashboard\n"
+                    "- Appendix with GST note, glossary & calculation scratchpad\n\n"
+                    "_All numbers are calculated using exact formulas - fully auditable._"
                 ),
                 parse_mode='Markdown',
             )
-        # Clean up PDF file after sending
         try:
             os.remove(pdf_path)
         except Exception:
             pass
 
         await update.message.reply_text(
-            "✅ *Report sent!*\n\n"
+            "*Report sent!*\n\n"
             "Use /start to run a new diagnostic, or /history to compare past analyses.",
             parse_mode='Markdown',
         )
@@ -630,7 +760,7 @@ async def handle_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logging.error(f"PDF generation failed: {e}")
         await update.message.reply_text(
-            "❌ Sorry, there was an error generating your PDF report. "
+            "Sorry, there was an error generating your PDF report. "
             "Your inline analysis above contains all the key insights.\n\n"
             f"_Error: {str(e)}_",
             parse_mode='Markdown',
@@ -643,28 +773,30 @@ async def handle_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ====================== HISTORY COMMAND ======================
 
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show a summary of past analyses for this user."""
     chat_id = update.message.chat_id
     history = load_analysis_history(chat_id)
 
     if not history:
         await update.message.reply_text(
-            "📭 No previous analyses found.\n\n"
+            "No previous analyses found.\n\n"
             "Run /start to begin your first diagnostic.",
             parse_mode='Markdown',
         )
         return
 
-    lines = ["📊 *Your Analysis History*\n"]
-    for i, entry in enumerate(history[-5:], 1):   # show last 5
+    lines = ["*Your Analysis History*\n"]
+    for i, entry in enumerate(history[-5:], 1):
         ts   = entry.get('timestamp', '')[:10]
         name = entry.get('business_name', 'Your Store')
+        st   = entry.get('store_type', '-')
         rev  = entry.get('annual_revenue', 0)
-        bn   = entry.get('bottleneck', '—')
+        bn   = entry.get('bottleneck', '-')
         np_v = entry.get('annual_profit', 0)
+        gm   = entry.get('gross_margin', 0)
         lines.append(
             f"*{i}. {name}* ({ts})\n"
-            f"   Revenue: ${rev:,.0f}  |  Profit: ${np_v:,.0f}\n"
+            f"   Store: {st.title()}  |  Revenue: {fmt_currency(rev)}\n"
+            f"   Gross Margin: {gm:.1f}%  |  Net Profit: {fmt_currency(np_v)}\n"
             f"   Bottleneck: {bn}\n"
         )
 
@@ -675,8 +807,12 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ====================== CANCEL ======================
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Diagnostic cancelled. Type /start to begin again.")
+    await update.message.reply_text(
+        "Diagnostic cancelled. Type /start to begin again.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return ConversationHandler.END
+
 
 # ====================== BOT SETUP ======================
 
@@ -687,15 +823,19 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            TIMEFRAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, timeframe)],
-            CUSTOMERS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, customers)],
-            FREQUENCY:  [MessageHandler(filters.TEXT & ~filters.COMMAND, frequency)],
-            AVG_SPEND:  [MessageHandler(filters.TEXT & ~filters.COMMAND, avg_spend)],
-            GROSS_MARGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, gross_margin)],
-            COGS:       [MessageHandler(filters.TEXT & ~filters.COMMAND, cogs)],
-            NET_PROFIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, net_profit)],
-            CHALLENGES: [MessageHandler(filters.TEXT & ~filters.COMMAND, challenges)],
-            DIAGNOSTIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, diagnostic)],
+            TIMEFRAME:      [MessageHandler(filters.TEXT & ~filters.COMMAND, timeframe)],
+            STORE_TYPE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, store_type)],
+            CUSTOMERS:      [MessageHandler(filters.TEXT & ~filters.COMMAND, customers)],
+            FREQUENCY:      [MessageHandler(filters.TEXT & ~filters.COMMAND, frequency)],
+            AVG_SPEND:      [MessageHandler(filters.TEXT & ~filters.COMMAND, avg_spend)],
+            GST_CONFIRM:    [MessageHandler(filters.TEXT & ~filters.COMMAND, gst_confirm)],
+            COGS_PCT:       [MessageHandler(filters.TEXT & ~filters.COMMAND, cogs_pct)],
+            LABOUR_PCT:     [MessageHandler(filters.TEXT & ~filters.COMMAND, labour_pct)],
+            OCCUPANCY_PCT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, occupancy_pct)],
+            MARKETING_PCT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, marketing_pct)],
+            OTHER_CODB_PCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, other_codb_pct)],
+            CHALLENGES:     [MessageHandler(filters.TEXT & ~filters.COMMAND, challenges)],
+            DIAGNOSTIC:     [MessageHandler(filters.TEXT & ~filters.COMMAND, diagnostic)],
             UPLOAD: [
                 MessageHandler(filters.Document.ALL, handle_upload),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, skip_upload),
@@ -718,19 +858,27 @@ def main():
     app.add_handler(CommandHandler(
         'help',
         lambda u, c: u.message.reply_text(
-            "📖 *Retail DNA Bot — Commands*\n\n"
-            "/start   — begin a new diagnostic\n"
-            "/week    — set timeframe to weekly\n"
-            "/month   — set timeframe to monthly\n"
-            "/year    — set timeframe to yearly\n"
-            "/history — view past analyses\n"
-            "/cancel  — cancel current session",
+            "*Retail DNA Bot - Commands*\n\n"
+            "/start   - begin a new diagnostic\n"
+            "/week    - set timeframe to weekly\n"
+            "/month   - set timeframe to monthly\n"
+            "/year    - set timeframe to yearly\n"
+            "/history - view past analyses\n"
+            "/cancel  - cancel current session\n\n"
+            "*Data collected:*\n"
+            "Store type, customers, frequency, avg spend (GST-exclusive),\n"
+            "COGS %, labour %, occupancy %, marketing %, other CODB %\n\n"
+            "*Report includes:*\n"
+            "Store-type benchmarks, exact P&L, CODB breakdown,\n"
+            "scenario planning, 90-day & 12-month projections,\n"
+            "calculation scratchpad for full auditability.",
             parse_mode='Markdown'
         )
     ))
 
-    print("🤖 Retail DNA Bot is running…")
+    print("Retail DNA Bot is running...")
     app.run_polling()
+
 
 if __name__ == '__main__':
     main()
