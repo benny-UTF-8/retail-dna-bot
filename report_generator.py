@@ -1038,6 +1038,94 @@ def _page5_scenario(story, calc, chart_path, styles):
     story.append(scen_tbl)
     story.append(Spacer(1, 14))
 
+    # ── Bottleneck vs. highest-ROI callout ───────────────────────────────
+    bottleneck    = calc['bottleneck']
+    highest_roi   = scenario_rows[0]['lever'] if scenario_rows else bottleneck
+    is_same_lever = (bottleneck == highest_roi)
+
+    if is_same_lever:
+        callout_body = (
+            f'<b>Good news:</b> The highest-ROI lever and the bottleneck lever '
+            f'are the same — <b>{bottleneck}</b>. Prioritising it first will '
+            f'deliver both the constraint relief and the highest profit return '
+            f'simultaneously. Proceed with confidence.'
+        )
+    else:
+        bottleneck_examples = {
+            'Frequency':
+                'If Frequency is the bottleneck (low repeat visits), improving '
+                'Margin won\'t help much — you don\'t have enough customer visits '
+                'to benefit from the higher margin. Fix the bottleneck first.',
+            'Customer Base':
+                'If Customer Base is the bottleneck (too few customers), '
+                'optimising Transaction Value or Margin yields limited returns '
+                'because the volume simply isn\'t there yet. Fix the bottleneck first.',
+            'Transaction Value':
+                'If Transaction Value is the bottleneck (customers spending too '
+                'little per visit), growing your Customer Base amplifies a weak '
+                'spend rate. Fix the bottleneck first.',
+            'Margin':
+                'If Margin is the bottleneck (costs eroding profit), revenue '
+                'growth alone won\'t rescue the bottom line — every extra dollar '
+                'earned leaks straight out. Fix the bottleneck first.',
+        }
+        example_text = bottleneck_examples.get(
+            bottleneck,
+            f'Every other lever\'s impact is constrained by {bottleneck}. '
+            f'Fix the bottleneck first.'
+        )
+        callout_body = (
+            f'<b>Highest-ROI lever \u2260 bottleneck lever in this report.</b><br/><br/>'
+            f'The bottleneck <b>{bottleneck}</b> should be addressed <b>FIRST</b> '
+            f'as it is the multiplier on all other levers. Every other lever\'s '
+            f'impact is constrained by the bottleneck.<br/><br/>'
+            f'<i>Example: {example_text}</i><br/><br/>'
+            f'<b>Recommended sequence:</b><br/>'
+            f'1. Address the bottleneck lever (<b>{bottleneck}</b> — this report\'s priority)<br/>'
+            f'2. Then optimise the highest-ROI levers from the scenario table above (<b>{highest_roi}</b> ranks first)<br/>'
+            f'3. Compound improvements across all four levers over 12 months'
+        )
+
+    callout_title_style = ParagraphStyle(
+        'callout_title',
+        fontName='Helvetica-Bold',
+        fontSize=10,
+        textColor=colors.HexColor('#7D4E00'),
+        leading=14,
+        spaceAfter=4,
+    )
+    callout_body_style = ParagraphStyle(
+        'callout_body',
+        fontName='Helvetica',
+        fontSize=8.5,
+        textColor=DARK_GREY,
+        leading=13,
+        spaceAfter=0,
+    )
+
+    callout_icon  = '\u26a0\ufe0f' if not is_same_lever else '\U0001f3af'
+    callout_title = (
+        f'{callout_icon}  Important: Bottleneck vs. Highest-ROI Lever'
+    )
+
+    callout_data = [[
+        Paragraph(callout_title, callout_title_style),
+    ], [
+        Paragraph(callout_body, callout_body_style),
+    ]]
+    callout_tbl = Table(callout_data, colWidths=[usable_w])
+    callout_tbl.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor('#FFF3CD')),
+        ('TOPPADDING',    (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 14),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 12),
+        ('LINEBEFORE',    (0, 0), (0, -1),  5, colors.HexColor('#E67E22')),
+        ('ROUNDEDCORNERS', [4]),
+    ]))
+    story.append(KeepTogether([callout_tbl]))
+    story.append(Spacer(1, 14))
+
     story.append(Paragraph('Net Profit Impact Visualisation', styles['h2']))
     story.append(Spacer(1, 4))
     img = Image(chart_path, width=usable_w, height=usable_w * 0.40)
