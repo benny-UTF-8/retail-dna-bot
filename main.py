@@ -5,8 +5,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from report_generator import generate_pdf_report, load_analysis_history
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -22,7 +23,9 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
     CHALLENGES,
     DIAGNOSTIC,
     UPLOAD,
-) = range(10)
+    BUSINESS_NAME,
+    PDF_CONFIRM,
+) = range(12)
 
 # ====================== LEVER ANALYSIS ENGINE ======================
 
@@ -425,13 +428,11 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ File loaded! ({len(df)} rows)")
         except Exception as e:
             await update.message.reply_text(f"❌ Error reading file: {str(e)}")
-    await generate_analysis(update, context)
-    return ConversationHandler.END
+    return await generate_analysis(update, context)
 
 async def skip_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.lower().strip() == 'skip':
-        await generate_analysis(update, context)
-        return ConversationHandler.END
+        return await generate_analysis(update, context)
     await update.message.reply_text("Type `skip` to continue without a file, or attach an Excel/CSV.", parse_mode='Markdown')
     return UPLOAD
 
@@ -529,6 +530,148 @@ async def generate_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(analysis, parse_mode='Markdown')
 
+    # ── Prompt for business name to generate PDF ──────────────────────
+    await update.message.reply_text(
+        "📄 *Would you like a professional PDF report?*\n\n"
+        "First, what is your *business name*?\n"
+        "_(Type your store name, or type `skip` to use \"Your Store\")_",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return BUSINESS_NAME
+
+
+async def collect_business_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collect the business name, then ask whether to generate the PDF."""
+    text = update.message.text.strip()
+    if text.lower() == 'skip':
+        context.user_data['business_name'] = 'Your Store'
+    else:
+        context.user_data['business_name'] = text
+
+    reply_keyboard = [['✅ Yes, generate PDF', '❌ No thanks']]
+    await update.message.reply_text(
+        f"Great!  Generating a report for *{context.user_data['business_name']}*.\n\n"
+        "Shall I create your *10-page PDF diagnostic report* now?\n"
+        "_(It includes financial snapshot, lever analysis, scenario planning, "
+        "recommendations, 90-day action plan, projections, and more.)_",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardMarkup(
+            reply_keyboard, one_time_keyboard=True, resize_keyboard=True
+        ),
+    )
+    return PDF_CONFIRM
+
+
+async def handle_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate and send the PDF report, or gracefully decline."""
+    text = update.message.text.strip()
+
+    if '❌' in text or text.lower() in ('no', 'no thanks', 'nope', 'n'):
+        await update.message.reply_text(
+            "No problem! Your inline analysis is above. 📊\n\n"
+            "_Use /start to run a new diagnostic, or /history to view past analyses._",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    # User wants the PDF
+    business_name = context.user_data.get('business_name', 'Your Store')
+    chat_id       = update.message.chat_id
+
+    await update.message.reply_text(
+        "⏳ *Building your PDF report…*\n"
+        "This takes a few seconds — please wait.",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    try:
+        pdf_path = generate_pdf_report(
+            data=context.user_data,
+            chat_id=chat_id,
+            business_name=business_name,
+        )
+        with open(pdf_path, 'rb') as pdf_file:
+            await update.message.reply_document(
+                document=pdf_file,
+                filename=f"RetailDNA_Report_{business_name.replace(' ', '_')}.pdf",
+                caption=(
+                    f"📋 *Retail DNA Report — {business_name}*\n\n"
+                    "Your 10-page diagnostic report is ready. It includes:\n"
+                    "• Executive summary & key metrics\n"
+                    "• Financial snapshot\n"
+                    "• Lever analysis with charts\n"
+                    "• Bottleneck deep-dive\n"
+                    "• Scenario planning (what-if analysis)\n"
+                    "• Prioritised recommendations\n"
+                    "• 90-day action plan\n"
+                    "• Financial projections\n"
+                    "• KPI tracking dashboard\n"
+                    "• Appendix & glossary\n\n"
+                    "_Share with your team or advisor, and use the tracking "
+                    "sheet to monitor progress._"
+                ),
+                parse_mode='Markdown',
+            )
+        # Clean up PDF file after sending
+        try:
+            os.remove(pdf_path)
+        except Exception:
+            pass
+
+        await update.message.reply_text(
+            "✅ *Report sent!*\n\n"
+            "Use /start to run a new diagnostic, or /history to compare past analyses.",
+            parse_mode='Markdown',
+        )
+
+    except Exception as e:
+        logging.error(f"PDF generation failed: {e}")
+        await update.message.reply_text(
+            "❌ Sorry, there was an error generating your PDF report. "
+            "Your inline analysis above contains all the key insights.\n\n"
+            f"_Error: {str(e)}_",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+    return ConversationHandler.END
+
+
+# ====================== HISTORY COMMAND ======================
+
+async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a summary of past analyses for this user."""
+    chat_id = update.message.chat_id
+    history = load_analysis_history(chat_id)
+
+    if not history:
+        await update.message.reply_text(
+            "📭 No previous analyses found.\n\n"
+            "Run /start to begin your first diagnostic.",
+            parse_mode='Markdown',
+        )
+        return
+
+    lines = ["📊 *Your Analysis History*\n"]
+    for i, entry in enumerate(history[-5:], 1):   # show last 5
+        ts   = entry.get('timestamp', '')[:10]
+        name = entry.get('business_name', 'Your Store')
+        rev  = entry.get('annual_revenue', 0)
+        bn   = entry.get('bottleneck', '—')
+        np_v = entry.get('annual_profit', 0)
+        lines.append(
+            f"*{i}. {name}* ({ts})\n"
+            f"   Revenue: ${rev:,.0f}  |  Profit: ${np_v:,.0f}\n"
+            f"   Bottleneck: {bn}\n"
+        )
+
+    lines.append("_Run /start to add a new analysis._")
+    await update.message.reply_text('\n'.join(lines), parse_mode='Markdown')
+
+
 # ====================== CANCEL ======================
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -557,23 +700,31 @@ def main():
                 MessageHandler(filters.Document.ALL, handle_upload),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, skip_upload),
             ],
+            BUSINESS_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, collect_business_name),
+            ],
+            PDF_CONFIRM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pdf_confirm),
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
-    app.add_handler(CommandHandler('week',  set_weekly))
-    app.add_handler(CommandHandler('month', set_monthly))
-    app.add_handler(CommandHandler('year',  set_yearly))
+    app.add_handler(CommandHandler('week',    set_weekly))
+    app.add_handler(CommandHandler('month',   set_monthly))
+    app.add_handler(CommandHandler('year',    set_yearly))
+    app.add_handler(CommandHandler('history', show_history))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler(
         'help',
         lambda u, c: u.message.reply_text(
             "📖 *Retail DNA Bot — Commands*\n\n"
-            "/start — begin a new diagnostic\n"
-            "/week  — set timeframe to weekly\n"
-            "/month — set timeframe to monthly\n"
-            "/year  — set timeframe to yearly\n"
-            "/cancel — cancel current session",
+            "/start   — begin a new diagnostic\n"
+            "/week    — set timeframe to weekly\n"
+            "/month   — set timeframe to monthly\n"
+            "/year    — set timeframe to yearly\n"
+            "/history — view past analyses\n"
+            "/cancel  — cancel current session",
             parse_mode='Markdown'
         )
     ))
@@ -583,4 +734,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
