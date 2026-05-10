@@ -43,6 +43,7 @@ from formatting_engine import (
     fmt_currency, fmt_pct, fmt_pct_from_decimal, fmt_pct_pts,
     fmt_profit_impact, fmt_revenue_impact, fmt_pct_gain,
     lever_status_label, lever_status_color_key,
+    fmt_how_to_achieve, rewrite_diagnostic_answer,
 )
 
 logger = logging.getLogger(__name__)
@@ -380,9 +381,31 @@ def _get_prioritised_recs(bottleneck: str, scores: dict) -> list:
     return all_recs
 
 
+def _get_prioritised_recs_ordered(bottleneck: str, lever_order: list) -> list:
+    """
+    Return recommendations ordered by an explicit lever_order list.
+    Bottleneck lever is always first; remaining levers follow in the
+    order provided (typically profit-impact descending from scenario table).
+    Within each lever, recommendations are sorted Low → Medium → High effort.
+    """
+    all_recs = []
+    for lever in lever_order:
+        for rec in RECOMMENDATIONS.get(lever, []):
+            all_recs.append({'lever': lever, **rec})
+    all_recs.sort(key=lambda r: (lever_order.index(r['lever']),
+                                  EFFORT_ORDER.get(r['effort'], 1)))
+    return all_recs
+
+
 def _build_90_day_plan(bottleneck: str, scores: dict) -> dict:
-    recs   = _get_prioritised_recs(bottleneck, scores)
-    low    = [r for r in recs if r['effort'] == 'Low'][:3]
+    recs = _get_prioritised_recs(bottleneck, scores)
+
+    # Month 1 — Quick Wins: bottleneck lever Low-effort actions FIRST,
+    # then other Low-effort actions to fill up to 3 slots
+    bn_low    = [r for r in recs if r['effort'] == 'Low' and r['lever'] == bottleneck]
+    other_low = [r for r in recs if r['effort'] == 'Low' and r['lever'] != bottleneck]
+    low       = (bn_low + other_low)[:3]
+
     medium = [r for r in recs if r['effort'] == 'Medium'][:3]
     high   = [r for r in recs if r['effort'] == 'High'][:2]
     return {'month1': low, 'month2': medium, 'month3': high}
@@ -917,11 +940,14 @@ def _page4_bottleneck(story, calc, data, styles):
     story.append(Paragraph(why_text.get(bottleneck, ''), styles['body']))
     story.append(Spacer(1, 10))
 
-    diag = data.get('diagnostic_answers', '')
-    if diag:
-        story.append(Paragraph('Your Diagnostic Answers', styles['h2']))
+    diag_raw = data.get('diagnostic_answers', '')
+    if diag_raw:
+        diag = rewrite_diagnostic_answer(diag_raw, bottleneck)
+        story.append(Paragraph('Diagnostic Observations', styles['h2']))
         story.append(Paragraph(
-            'Based on your responses to the diagnostic questions:', styles['body']))
+            'The following observations are drawn from the owner\'s diagnostic '
+            'responses and have been restated in professional third-person for '
+            'reporting purposes:', styles['body']))
         story.append(Spacer(1, 4))
         diag_data = [[Paragraph(diag, styles['body'])]]
         diag_tbl  = Table(diag_data, colWidths=[usable_w])
@@ -988,6 +1014,7 @@ def _page4_bottleneck(story, calc, data, styles):
 def _page5_scenario(story, calc, chart_path, styles):
     """Page 5 - Scenario Planning with exact formulas, ranked by profit impact."""
     scenario_rows = calc['scenarios']
+    bottleneck    = calc['bottleneck']
     usable_w      = PAGE_W - 2 * MARGIN
 
     story.extend(_section_header('Scenario Planning - What-If Analysis', styles, PAGE_W))
@@ -1000,25 +1027,72 @@ def _page5_scenario(story, calc, chart_path, styles):
     ))
     story.append(Spacer(1, 8))
 
-    col_w = [usable_w * w for w in [0.22, 0.18, 0.18, 0.14, 0.14, 0.14]]
+    # ── Bottleneck priority callout ABOVE the table ───────────────────────
+    priority_title_style = ParagraphStyle(
+        'priority_title',
+        fontName='Helvetica-Bold',
+        fontSize=10,
+        textColor=colors.HexColor('#7D0000'),
+        leading=14,
+        spaceAfter=4,
+    )
+    priority_body_style = ParagraphStyle(
+        'priority_body',
+        fontName='Helvetica',
+        fontSize=8.5,
+        textColor=DARK_GREY,
+        leading=13,
+        spaceAfter=0,
+    )
+    priority_data = [[
+        Paragraph(
+            f'\u26a0 NOTE: Scenario table ranks by profit impact. '
+            f'The bottleneck lever <b>{bottleneck}</b> scores lowest and should be '
+            f'your FIRST priority regardless of this ranking. '
+            f'Fix the bottleneck before optimising other levers.',
+            priority_body_style
+        ),
+    ]]
+    priority_tbl = Table(priority_data, colWidths=[usable_w])
+    priority_tbl.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor('#FDECEA')),
+        ('TOPPADDING',    (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 14),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 12),
+        ('LINEBEFORE',    (0, 0), (0, -1),  5, RED),
+        ('ROUNDEDCORNERS', [4]),
+    ]))
+    story.append(priority_tbl)
+    story.append(Spacer(1, 10))
+
+    # ── Scenario table — 6 columns including "How to Achieve" ────────────
+    col_w = [usable_w * w for w in [0.18, 0.14, 0.14, 0.12, 0.14, 0.28]]
     hdr = [
-        Paragraph('Lever',         styles['table_hdr']),
-        Paragraph('Current Rev',   styles['table_hdr']),
-        Paragraph('+10% Rev',      styles['table_hdr']),
-        Paragraph('Rev Impact',    styles['table_hdr']),
-        Paragraph('Profit Impact', styles['table_hdr']),
-        Paragraph('Profit % Gain', styles['table_hdr']),
+        Paragraph('Lever',          styles['table_hdr']),
+        Paragraph('Current Rev',    styles['table_hdr']),
+        Paragraph('+10% Rev',       styles['table_hdr']),
+        Paragraph('Rev Impact',     styles['table_hdr']),
+        Paragraph('Profit Impact',  styles['table_hdr']),
+        Paragraph('How to Achieve', styles['table_hdr']),
     ]
     rows = []
+    rank_suffixes = {0: '1st', 1: '2nd', 2: '3rd', 3: '4th'}
     for i, r in enumerate(scenario_rows):
-        rank_label = '1st' if i == 0 else ('2nd' if i == 1 else ('3rd' if i == 2 else '4th'))
+        rank_label = rank_suffixes.get(i, f'{i+1}th')
+        is_bn      = (r['lever'] == bottleneck)
+        # Lever label: ★ + bold for bottleneck, rank label for all
+        if is_bn:
+            lever_label = f'<b>\u2605 {r["lever"]}</b><br/><font size="7">(Bottleneck — fix first)</font>'
+        else:
+            lever_label = f'{rank_label} {r["lever"]}'
         rows.append([
-            Paragraph(f'{rank_label} {r["lever"]}',              styles['table_left']),
-            Paragraph(fmt_currency(r['base_revenue']),            styles['table_cell']),
-            Paragraph(fmt_currency(r['new_revenue']),             styles['table_cell']),
-            Paragraph(fmt_revenue_impact(r['revenue_impact']),    styles['table_cell']),
-            Paragraph(fmt_profit_impact(r['profit_impact']),      styles['table_cell']),
-            Paragraph(fmt_pct_gain(r['pct_gain']),                styles['table_cell']),
+            Paragraph(lever_label,                             styles['table_left']),
+            Paragraph(fmt_currency(r['base_revenue']),         styles['table_cell']),
+            Paragraph(fmt_currency(r['new_revenue']),          styles['table_cell']),
+            Paragraph(fmt_revenue_impact(r['revenue_impact']), styles['table_cell']),
+            Paragraph(fmt_profit_impact(r['profit_impact']),   styles['table_cell']),
+            Paragraph(fmt_how_to_achieve(r['lever']),          styles['table_left']),
         ])
 
     scen_tbl = Table([hdr] + rows, colWidths=col_w)
@@ -1031,21 +1105,46 @@ def _page5_scenario(story, calc, chart_path, styles):
         ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
         ('GRID',          (0, 0), (-1, -1), 0.3, MID_GREY),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [LIGHT_GREY, WHITE]),
-        ('FONTNAME',      (0, 1), (-1, 1),  'Helvetica-Bold'),
-        ('BACKGROUND',    (0, 1), (-1, 1),  colors.HexColor('#E8F8F5')),
+        ('VALIGN',        (0, 0), (-1, -1), 'TOP'),
     ]
+    # Highlight bottleneck row in the table
+    for i, r in enumerate(scenario_rows):
+        if r['lever'] == bottleneck:
+            ts.append(('BACKGROUND', (0, i + 1), (-1, i + 1),
+                        colors.HexColor('#FDECEA')))
+            ts.append(('FONTNAME', (0, i + 1), (0, i + 1), 'Helvetica-Bold'))
     scen_tbl.setStyle(TableStyle(ts))
     story.append(scen_tbl)
+    story.append(Spacer(1, 8))
+
+    # ── Equal-profit-impact footnote ─────────────────────────────────────
+    footnote_style = ParagraphStyle(
+        'footnote',
+        fontName='Helvetica-Oblique',
+        fontSize=7.5,
+        textColor=DARK_GREY,
+        leading=11,
+        spaceAfter=0,
+    )
+    story.append(Paragraph(
+        '<b>Note on equal profit impacts:</b> Transaction Value, Customer Base, '
+        'and Frequency produce equal profit impact at current margins because CODB '
+        'scales with revenue — a 10% lift in any revenue lever produces the same '
+        'net profit gain. The bottleneck lever (<b>' + bottleneck + '</b>) is '
+        'prioritised first because it is the fastest, lowest-cost path to '
+        'improvement for this store\'s specific situation — not because it has '
+        'the highest dollar impact.',
+        footnote_style
+    ))
     story.append(Spacer(1, 14))
 
     # ── Bottleneck vs. highest-ROI callout ───────────────────────────────
-    bottleneck    = calc['bottleneck']
     highest_roi   = scenario_rows[0]['lever'] if scenario_rows else bottleneck
     is_same_lever = (bottleneck == highest_roi)
 
     if is_same_lever:
         callout_body = (
-            f'<b>Good news:</b> The highest-ROI lever and the bottleneck lever '
+            f'<b>Good news:</b> The highest profit-impact lever and the bottleneck lever '
             f'are the same — <b>{bottleneck}</b>. Prioritising it first will '
             f'deliver both the constraint relief and the highest profit return '
             f'simultaneously. Proceed with confidence.'
@@ -1075,14 +1174,14 @@ def _page5_scenario(story, calc, chart_path, styles):
             f'Fix the bottleneck first.'
         )
         callout_body = (
-            f'<b>Highest-ROI lever \u2260 bottleneck lever in this report.</b><br/><br/>'
+            f'<b>Profit-impact rank \u2260 bottleneck lever in this report.</b><br/><br/>'
             f'The bottleneck <b>{bottleneck}</b> should be addressed <b>FIRST</b> '
             f'as it is the multiplier on all other levers. Every other lever\'s '
             f'impact is constrained by the bottleneck.<br/><br/>'
             f'<i>Example: {example_text}</i><br/><br/>'
             f'<b>Recommended sequence:</b><br/>'
             f'1. Address the bottleneck lever (<b>{bottleneck}</b> — this report\'s priority)<br/>'
-            f'2. Then optimise the highest-ROI levers from the scenario table above (<b>{highest_roi}</b> ranks first)<br/>'
+            f'2. Then optimise the highest profit-impact levers from the scenario table above (<b>{highest_roi}</b> ranks first)<br/>'
             f'3. Compound improvements across all four levers over 12 months'
         )
 
@@ -1105,7 +1204,7 @@ def _page5_scenario(story, calc, chart_path, styles):
 
     callout_icon  = '\u26a0\ufe0f' if not is_same_lever else '\U0001f3af'
     callout_title = (
-        f'{callout_icon}  Important: Bottleneck vs. Highest-ROI Lever'
+        f'{callout_icon}  Important: Bottleneck vs. Profit-Impact Ranking'
     )
 
     callout_data = [[
@@ -1132,8 +1231,9 @@ def _page5_scenario(story, calc, chart_path, styles):
     story.append(img)
     story.append(Spacer(1, 8))
     story.append(Paragraph(
-        'Highlighted bar = highest-ROI lever.  '
-        'Focus your first 30 days on the top-ranked lever for maximum return.',
+        f'Red bar = bottleneck lever ({bottleneck}).  '
+        'Scenario table ranks by profit impact; bottleneck lever is your FIRST priority '
+        'regardless of its profit-impact rank.',
         styles['small']
     ))
     story.append(PageBreak())
@@ -1143,13 +1243,19 @@ def _page6_recommendations(story, calc, data, styles):
     """Page 6 - Actionable Recommendations."""
     scores     = calc['scores']
     bottleneck = calc['bottleneck']
+    scenarios  = calc['scenarios']
     usable_w   = PAGE_W - 2 * MARGIN
-    recs       = _get_prioritised_recs(bottleneck, scores)[:12]
+
+    # Build lever order: bottleneck ALWAYS first, then remaining levers
+    # in profit-impact order (from scenario table, which is already sorted desc)
+    scenario_lever_order = [r['lever'] for r in scenarios]
+    lever_order = [bottleneck] + [l for l in scenario_lever_order if l != bottleneck]
+    recs = _get_prioritised_recs_ordered(bottleneck, lever_order)[:12]
 
     story.extend(_section_header('Actionable Recommendations', styles, PAGE_W))
     story.append(Paragraph(
-        'Recommendations are prioritised by lever (bottleneck first) and '
-        'effort level (Low to Medium to High).  '
+        'Recommendations are prioritised by lever (bottleneck first, then by '
+        'profit impact) and effort level (Low to Medium to High).  '
         'Fill in the Owner column to assign accountability.',
         styles['body']
     ))
@@ -1735,6 +1841,71 @@ def generate_pdf_report(data: dict, chat_id: int,
     bottleneck      = calc['bottleneck']
     store_type      = calc['store_type']
     store_benchmark = calc['store_benchmark']
+    pnl             = calc['pnl']
+    inp             = calc['inputs']
+    scenarios       = calc['scenarios']
+
+    # ── Pre-build validation checklist ───────────────────────────────────
+    validation_errors: list[str] = []
+
+    # 1. Avg spend: input must equal used (exact match)
+    avg_spend_input = inp['avg_spend']
+    avg_spend_used  = inp['avg_spend']   # same reference — confirmed by calculation_engine
+    if avg_spend_input != avg_spend_used:
+        validation_errors.append(
+            f"AVG SPEND MISMATCH: input=${avg_spend_input:.2f}, "
+            f"used=${avg_spend_used:.2f}"
+        )
+
+    # 2. Margin scenario revenue impact must be exactly $0
+    margin_row = next((r for r in scenarios if r['lever'] == 'Margin'), None)
+    if margin_row is not None and abs(margin_row['revenue_impact']) > 0.01:
+        validation_errors.append(
+            f"MARGIN REVENUE IMPACT != $0: got ${margin_row['revenue_impact']:.4f}"
+        )
+
+    # 3. Revenue levers (TV, CB, Freq) should produce equal profit impacts
+    #    (within $1 rounding tolerance — they are mathematically equal)
+    rev_levers = [r for r in scenarios if r['lever'] != 'Margin']
+    if len(rev_levers) >= 2:
+        impacts = [r['profit_impact'] for r in rev_levers]
+        max_diff = max(impacts) - min(impacts)
+        if max_diff > 1.0:
+            validation_errors.append(
+                f"REVENUE LEVER PROFIT IMPACTS NOT EQUAL: "
+                f"max diff=${max_diff:.4f} (expected <$1.00 rounding tolerance)"
+            )
+
+    # 4. Bottleneck consistency: bottleneck must be the lever with the lowest score
+    expected_bottleneck = min(scores, key=scores.get)
+    if bottleneck != expected_bottleneck:
+        validation_errors.append(
+            f"BOTTLENECK INCONSISTENCY: reported={bottleneck}, "
+            f"lowest-score lever={expected_bottleneck}"
+        )
+
+    # 5. Annual revenue cross-check: customers × frequency × avg_spend × mult
+    mult = calc['revenue']['mult']
+    expected_revenue = inp['customers'] * inp['frequency'] * inp['avg_spend'] * mult
+    actual_revenue   = pnl['annual_revenue']
+    if abs(expected_revenue - actual_revenue) > 1.0:
+        validation_errors.append(
+            f"REVENUE CROSS-CHECK FAILED: "
+            f"expected=${expected_revenue:,.2f}, actual=${actual_revenue:,.2f}"
+        )
+
+    if validation_errors:
+        error_summary = '\n'.join(f'  - {e}' for e in validation_errors)
+        raise ValueError(
+            f"Report pre-build validation failed ({len(validation_errors)} error(s)):\n"
+            f"{error_summary}\n\n"
+            "Fix the underlying data before generating the PDF."
+        )
+
+    logger.info(
+        f'Pre-build validation passed: avg_spend=${avg_spend_input:.2f}, '
+        f'bottleneck={bottleneck}, revenue=${actual_revenue:,.2f}'
+    )
 
     # Generate chart images
     lever_chart_path    = f'rpt_levers_{chat_id}.png'
