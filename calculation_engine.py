@@ -166,7 +166,8 @@ def calculate_all(data: dict) -> dict:
     # ── Raw inputs ───────────────────────────────────────────────────────
     customers      = float(data.get('customers', 0))
     frequency      = float(data.get('frequency', 1))
-    avg_spend      = float(data.get('avg_spend', 0))
+    avg_spend_input = float(data.get('avg_spend', 0))   # exact user input — never modified
+    avg_spend      = avg_spend_input                     # used in all calculations
     cogs_pct_raw   = float(data.get('cogs_pct', 0))   # e.g. 59.0 → 0.59
     labour_pct_raw = float(data.get('labour_pct', 0))
     occ_pct_raw    = float(data.get('occupancy_pct', 0))
@@ -184,6 +185,15 @@ def calculate_all(data: dict) -> dict:
 
     # Annualisation multiplier
     mult = {'weekly': 52, 'monthly': 12, 'yearly': 1}.get(timeframe, 52)
+
+    # ── Avg spend integrity check ────────────────────────────────────────
+    # avg_spend must equal avg_spend_input exactly (no rounding, no modification).
+    if avg_spend != avg_spend_input:
+        raise ValueError(
+            f"avg_spend integrity failure: input=${avg_spend_input:.2f}, "
+            f"used=${avg_spend:.2f}. Difference=${abs(avg_spend - avg_spend_input):.4f}. "
+            "avg_spend must be used exactly as entered — no rounding or modification."
+        )
 
     # ── Revenue calculations ─────────────────────────────────────────────
     weekly_revenue = customers * frequency * avg_spend
@@ -248,7 +258,7 @@ def calculate_all(data: dict) -> dict:
 
     # ── Scratchpad (for transparency / appendix) ──────────────────────────
     scratchpad = _build_scratchpad(
-        customers, frequency, avg_spend, mult,
+        customers, frequency, avg_spend, avg_spend_input, mult,
         weekly_revenue, annual_revenue,
         cogs_pct_raw, cogs_pct, annual_cogs,
         annual_gross_profit, gross_margin_pct,
@@ -484,7 +494,7 @@ def _build_projections(
 # ─────────────────────────────────────────────
 
 def _build_scratchpad(
-    customers, frequency, avg_spend, mult,
+    customers, frequency, avg_spend, avg_spend_input, mult,
     weekly_revenue, annual_revenue,
     cogs_pct_raw, cogs_pct, annual_cogs,
     annual_gross_profit, gross_margin_pct,
@@ -500,8 +510,14 @@ def _build_scratchpad(
     Build a list of human-readable scratchpad lines showing every
     intermediate calculation step.
     """
+    avg_spend_match = "✓ MATCH" if avg_spend_input == avg_spend else "✗ MISMATCH — ERROR"
     lines = [
         "=== SCRATCHPAD CALCULATIONS ===",
+        "",
+        "--- AVG SPEND INTEGRITY ---",
+        f"avg_spend input  = ${avg_spend_input:.2f}",
+        f"avg_spend used   = ${avg_spend:.2f}",
+        f"VALIDATION: avg_spend input = ${avg_spend_input:.2f}, avg_spend used = ${avg_spend:.2f}  {avg_spend_match}",
         "",
         "--- REVENUE ---",
         f"weekly_revenue = {customers:,.0f} × {frequency:.2f} × ${avg_spend:.2f} = ${weekly_revenue:,.2f}",

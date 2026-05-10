@@ -154,6 +154,87 @@ def lever_status_color_key(score: float) -> str:
 
 
 # ─────────────────────────────────────────────
+# How to Achieve helper
+# ─────────────────────────────────────────────
+
+def fmt_how_to_achieve(lever: str) -> str:
+    """
+    Return a concise, actionable tactics string for the given lever.
+    Used in the scenario table 'How to Achieve' column.
+    """
+    tactics = {
+        'Frequency':         'Loyalty programme, FOP stocking, in-store events',
+        'Customer Base':     'Marketing, referrals, range expansion',
+        'Transaction Value': 'Cross-sell training, upsell, merchandising',
+        'Margin':            'COGS reduction, supplier negotiation',
+    }
+    return tactics.get(lever, 'Review lever-specific strategies')
+
+
+# ─────────────────────────────────────────────
+# Diagnostic answer rewriter
+# ─────────────────────────────────────────────
+
+def rewrite_diagnostic_answer(raw_text: str, bottleneck: str) -> str:
+    """
+    Rewrite raw user diagnostic text into professional third-person prose.
+
+    Strips first-person pronouns, conversational filler, and incomplete
+    sentences.  Returns a polished observation suitable for a business report.
+    """
+    if not raw_text or not raw_text.strip():
+        return ''
+
+    import re
+
+    text = raw_text.strip()
+
+    # ── Normalise whitespace ─────────────────────────────────────────────
+    text = re.sub(r'\s+', ' ', text)
+
+    # ── Strip first-person pronouns (case-insensitive) ───────────────────
+    # Replace "I have", "I've", "I do", "I don't", "I am", "I'm" etc.
+    text = re.sub(r"\bI've\b", 'The store has', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bI'm\b",  'The store is',  text, flags=re.IGNORECASE)
+    text = re.sub(r"\bI am\b", 'The store is',  text, flags=re.IGNORECASE)
+    text = re.sub(r"\bI do\b", 'The store does', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bI don't\b", 'The store does not', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bI have\b", 'The store has', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bI\b", 'The store', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwe've\b", 'the business has', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwe're\b", 'the business is',  text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwe are\b", 'the business is', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwe have\b", 'the business has', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwe\b", 'the business', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bmy\b",  'the store\'s', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bour\b", 'the store\'s', text, flags=re.IGNORECASE)
+
+    # ── Remove conversational filler ─────────────────────────────────────
+    filler_patterns = [
+        r'\bum\b', r'\buh\b', r'\byeah\b', r'\byep\b', r'\bnope\b',
+        r'\bkinda\b', r'\bsorta\b', r'\bbasically\b', r'\blike\b(?=\s)',
+        r'\bpretty much\b', r'\bto be honest\b', r'\bhonestly\b',
+        r'\bI guess\b', r'\bI think\b', r'\bI reckon\b',
+    ]
+    for pat in filler_patterns:
+        text = re.sub(pat, '', text, flags=re.IGNORECASE)
+
+    # ── Clean up double spaces left by removals ──────────────────────────
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+
+    # ── Capitalise first letter of each sentence ─────────────────────────
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = [s[0].upper() + s[1:] if s else s for s in sentences]
+    text = ' '.join(sentences)
+
+    # ── Ensure text ends with a period ───────────────────────────────────
+    if text and text[-1] not in '.!?':
+        text += '.'
+
+    return text
+
+
+# ─────────────────────────────────────────────
 # Convenience: format a full P&L row
 # ─────────────────────────────────────────────
 
