@@ -469,11 +469,13 @@ def load_analysis_history(chat_id: int) -> list:
 
 def _page1_cover(story, calc, data, business_name, report_date, styles):
     """Page 1 - Cover & Executive Summary."""
-    pnl        = calc['pnl']
-    scores     = calc['scores']
-    bottleneck = calc['bottleneck']
-    store_type = calc['store_type']
-    usable_w   = PAGE_W - 2 * MARGIN
+    pnl              = calc['pnl']
+    scores           = calc['scores']
+    bottleneck       = calc['bottleneck']
+    store_type       = calc['store_type']
+    context_override = calc.get('context_override', False)
+    override_reason  = calc.get('context_override_reason', '')
+    usable_w         = PAGE_W - 2 * MARGIN
 
     cover_data = [[Paragraph('RETAIL DNA', styles['cover_title'])]]
     cover_tbl  = Table(cover_data, colWidths=[usable_w])
@@ -586,7 +588,42 @@ def _page1_cover(story, calc, data, business_name, report_date, styles):
         ('BOX',           (0, 0), (-1, -1), 1, AMBER),
     ]))
     story.append(bn_tbl)
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 8))
+
+    # ── Contextual override callout (shown only when override is active) ──
+    if context_override and override_reason:
+        override_body_style = ParagraphStyle(
+            'override_body_p1',
+            fontName='Helvetica',
+            fontSize=8.5,
+            textColor=DARK_GREY,
+            leading=13,
+            spaceAfter=0,
+        )
+        override_title_style = ParagraphStyle(
+            'override_title_p1',
+            fontName='Helvetica-Bold',
+            fontSize=9,
+            textColor=colors.HexColor('#7D4E00'),
+            leading=13,
+            spaceAfter=4,
+        )
+        override_data = [
+            [Paragraph('\u26a0 CONTEXTUAL OVERRIDE', override_title_style)],
+            [Paragraph(override_reason, override_body_style)],
+        ]
+        override_tbl = Table(override_data, colWidths=[usable_w])
+        override_tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor('#FFF8DC')),
+            ('TOPPADDING',    (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+            ('LINEBEFORE',    (0, 0), (0, -1),  3, ORANGE),
+            ('ROUNDEDCORNERS', [4]),
+        ]))
+        story.append(override_tbl)
+        story.append(Spacer(1, 8))
 
     one_liners = {
         'Customer Base':
@@ -844,15 +881,18 @@ def _page3_lever_analysis(story, calc, data, chart_path, styles):
 
 def _page4_bottleneck(story, calc, data, styles):
     """Page 4 - Bottleneck Deep-Dive with exact profit impact formula."""
-    scores          = calc['scores']
-    bottleneck      = calc['bottleneck']
-    pnl             = calc['pnl']
-    inp             = calc['inputs']
-    store_benchmark = calc['store_benchmark']
-    usable_w        = PAGE_W - 2 * MARGIN
-    bn_score        = scores.get(bottleneck, 0)
-    status_ckey     = lever_status_color_key(bn_score)
-    status_color    = STATUS_COLORS.get(status_ckey, RED)
+    scores               = calc['scores']
+    bottleneck           = calc['bottleneck']
+    bottleneck_sb        = calc.get('bottleneck_score_based', bottleneck)
+    context_override     = calc.get('context_override', False)
+    override_reason      = calc.get('context_override_reason', '')
+    pnl                  = calc['pnl']
+    inp                  = calc['inputs']
+    store_benchmark      = calc['store_benchmark']
+    usable_w             = PAGE_W - 2 * MARGIN
+    bn_score             = scores.get(bottleneck, 0)
+    status_ckey          = lever_status_color_key(bn_score)
+    status_color         = STATUS_COLORS.get(status_ckey, RED)
 
     story.extend(_section_header(
         f'Bottleneck Deep-Dive: {bottleneck}', styles, PAGE_W))
@@ -940,6 +980,50 @@ def _page4_bottleneck(story, calc, data, styles):
     story.append(Paragraph(why_text.get(bottleneck, ''), styles['body']))
     story.append(Spacer(1, 10))
 
+    # ── Contextual Analysis section (shown only when override is active) ──
+    if context_override and override_reason:
+        story.append(Paragraph('Contextual Analysis', styles['h2']))
+        ctx_body_style = ParagraphStyle(
+            'ctx_body_p4',
+            fontName='Helvetica',
+            fontSize=9,
+            textColor=DARK_GREY,
+            leading=13,
+            spaceAfter=4,
+        )
+        ctx_note_style = ParagraphStyle(
+            'ctx_note_p4',
+            fontName='Helvetica-Oblique',
+            fontSize=8.5,
+            textColor=DARK_GREY,
+            leading=12,
+            spaceAfter=0,
+        )
+        sb_score = scores.get(bottleneck_sb, 0)
+        ctx_note = (
+            f'This contextual factor takes priority over the static benchmark score. '
+            f'While <b>{bottleneck_sb}</b> scores {sb_score:.0f}/100, the immediate '
+            f'business constraint is <b>{bottleneck}</b> due to the contextual event '
+            f'identified in the owner\'s diagnostic answers.'
+        )
+        ctx_data = [
+            [Paragraph(override_reason, ctx_body_style)],
+            [Spacer(1, 4)],
+            [Paragraph(ctx_note, ctx_note_style)],
+        ]
+        ctx_tbl = Table(ctx_data, colWidths=[usable_w])
+        ctx_tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor('#FFF8DC')),
+            ('TOPPADDING',    (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+            ('LINEBEFORE',    (0, 0), (0, -1),  3, ORANGE),
+            ('ROUNDEDCORNERS', [4]),
+        ]))
+        story.append(ctx_tbl)
+        story.append(Spacer(1, 10))
+
     diag_raw = data.get('diagnostic_answers', '')
     if diag_raw:
         diag = rewrite_diagnostic_answer(diag_raw, bottleneck)
@@ -1013,9 +1097,11 @@ def _page4_bottleneck(story, calc, data, styles):
 
 def _page5_scenario(story, calc, chart_path, styles):
     """Page 5 - Scenario Planning with exact formulas, ranked by profit impact."""
-    scenario_rows = calc['scenarios']
-    bottleneck    = calc['bottleneck']
-    usable_w      = PAGE_W - 2 * MARGIN
+    scenario_rows    = calc['scenarios']
+    bottleneck       = calc['bottleneck']
+    context_override = calc.get('context_override', False)
+    override_reason  = calc.get('context_override_reason', '')
+    usable_w         = PAGE_W - 2 * MARGIN
 
     story.extend(_section_header('Scenario Planning - What-If Analysis', styles, PAGE_W))
     story.append(Paragraph(
@@ -1026,6 +1112,44 @@ def _page5_scenario(story, calc, chart_path, styles):
         styles['body']
     ))
     story.append(Spacer(1, 8))
+
+    # ── Contextual override note (shown only when override is active) ─────
+    if context_override and override_reason:
+        ctx_note_title_style = ParagraphStyle(
+            'ctx_note_title_p5',
+            fontName='Helvetica-Bold',
+            fontSize=9,
+            textColor=colors.HexColor('#7D4E00'),
+            leading=13,
+            spaceAfter=4,
+        )
+        ctx_note_body_style = ParagraphStyle(
+            'ctx_note_body_p5',
+            fontName='Helvetica',
+            fontSize=8.5,
+            textColor=DARK_GREY,
+            leading=13,
+            spaceAfter=0,
+        )
+        ctx_note_data = [
+            [Paragraph(
+                '\u26a0 NOTE: This analysis is based on a contextual bottleneck override.',
+                ctx_note_title_style,
+            )],
+            [Paragraph(override_reason, ctx_note_body_style)],
+        ]
+        ctx_note_tbl = Table(ctx_note_data, colWidths=[usable_w])
+        ctx_note_tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor('#FFF8DC')),
+            ('TOPPADDING',    (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+            ('LINEBEFORE',    (0, 0), (0, -1),  3, ORANGE),
+            ('ROUNDEDCORNERS', [4]),
+        ]))
+        story.append(ctx_note_tbl)
+        story.append(Spacer(1, 8))
 
     # ── Bottleneck priority callout ABOVE the table ───────────────────────
     priority_title_style = ParagraphStyle(
@@ -1847,6 +1971,9 @@ def generate_pdf_report(data: dict, chat_id: int,
 
     # ── Pre-build validation checklist ───────────────────────────────────
     validation_errors: list[str] = []
+    context_override        = calc.get('context_override', False)
+    context_override_reason = calc.get('context_override_reason', '')
+    bottleneck_score_based  = calc.get('bottleneck_score_based', bottleneck)
 
     # 1. Avg spend: input must equal used (exact match)
     avg_spend_input = inp['avg_spend']
@@ -1876,13 +2003,28 @@ def generate_pdf_report(data: dict, chat_id: int,
                 f"max diff=${max_diff:.4f} (expected <$1.00 rounding tolerance)"
             )
 
-    # 4. Bottleneck consistency: bottleneck must be the lever with the lowest score
-    expected_bottleneck = min(scores, key=scores.get)
-    if bottleneck != expected_bottleneck:
-        validation_errors.append(
-            f"BOTTLENECK INCONSISTENCY: reported={bottleneck}, "
-            f"lowest-score lever={expected_bottleneck}"
-        )
+    # 4. Bottleneck consistency:
+    #    - If no contextual override: bottleneck must equal the lowest-score lever.
+    #    - If contextual override: bottleneck must differ from the score-based lever,
+    #      and override_reason must be non-empty.
+    expected_score_based = min(scores, key=scores.get)
+    if context_override:
+        if not context_override_reason:
+            validation_errors.append(
+                "CONTEXT OVERRIDE ACTIVE but override_reason is empty."
+            )
+        if bottleneck == bottleneck_score_based:
+            validation_errors.append(
+                f"CONTEXT OVERRIDE ACTIVE but bottleneck ({bottleneck}) "
+                f"equals bottleneck_score_based ({bottleneck_score_based}). "
+                "They must differ when an override is applied."
+            )
+    else:
+        if bottleneck != expected_score_based:
+            validation_errors.append(
+                f"BOTTLENECK INCONSISTENCY: reported={bottleneck}, "
+                f"lowest-score lever={expected_score_based}"
+            )
 
     # 5. Annual revenue cross-check: customers × frequency × avg_spend × mult
     mult = calc['revenue']['mult']
