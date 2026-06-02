@@ -59,6 +59,102 @@ def lever_status(score: float) -> str:
 
 
 # ─────────────────────────────────────────────
+# Contextual bottleneck detection
+# ─────────────────────────────────────────────
+
+# Keywords that signal a contextual event, mapped to the lever they impact.
+# Matching is case-insensitive.  The first lever whose keywords match wins;
+# if multiple levers match, the one with the most keyword hits wins.
+CONTEXTUAL_KEYWORDS: dict[str, list[str]] = {
+    'Customer Base': [
+        'competitor', 'opened', 'new store', "pak'nsave", 'countdown',
+        'foodstuffs', 'rival', 'lost customers', 'foot traffic', 'footfall',
+        'relocation', 'relocate', 'move', 'new location', 'lease', 'rent',
+        'premises', 'moved',
+    ],
+    'Frequency': [
+        'covid', 'lockdown', 'recovery', 'pandemic', 'restrictions',
+        'loyalty', 'repeat', 'come back', 'return', 'visit frequency',
+    ],
+    'Transaction Value': [
+        'staff', 'employee', 'turnover', 'quit', 'left', 'shortage',
+        'supply', 'stock', 'delivery', 'supplier', 'spend', 'basket',
+        'transaction', 'average', 'ticket', 'buy less',
+    ],
+    'Margin': [
+        'price', 'margin', 'cost', 'expensive', 'cheap', 'supplier cost',
+        'cogs', 'profit',
+    ],
+}
+
+
+def detect_contextual_bottleneck(
+    diagnostic_answers: str,
+    scores: dict,
+) -> tuple[str, str]:
+    """
+    Analyse free-text diagnostic answers for contextual events that may
+    indicate a different bottleneck than the lowest-scoring lever.
+
+    Parameters
+    ----------
+    diagnostic_answers : str
+        Raw text from the owner's diagnostic responses.
+    scores : dict
+        Lever scores produced by calculate_all(), e.g.
+        {'Customer Base': 76, 'Frequency': 65, ...}.
+
+    Returns
+    -------
+    (bottleneck_lever, override_reason)
+        override_reason is an empty string when no override applies.
+    """
+    if not diagnostic_answers or not diagnostic_answers.strip():
+        return ('', '')
+
+    text_lower = diagnostic_answers.lower()
+
+    # Count keyword hits per lever
+    hits: dict[str, int] = {}
+    for lever, keywords in CONTEXTUAL_KEYWORDS.items():
+        count = sum(1 for kw in keywords if kw.lower() in text_lower)
+        if count > 0:
+            hits[lever] = count
+
+    if not hits:
+        return ('', '')
+
+    # Lever with the most keyword hits is the contextual lever
+    contextual_lever = max(hits, key=hits.get)
+
+    # Score-based bottleneck (lowest score)
+    score_based_bottleneck = min(scores, key=scores.get)
+
+    # Only override when the contextual lever differs from the score-based one
+    if contextual_lever == score_based_bottleneck:
+        return (contextual_lever, '')
+
+    # Only override when the score-based bottleneck is GOOD (≥70) or HEALTHY (≥90)
+    # — i.e. it is not already critical enough to demand attention on its own.
+    score_based_score = scores[score_based_bottleneck]
+    if score_based_score < 70:
+        # Score-based bottleneck is genuinely critical; do not override
+        return (score_based_bottleneck, '')
+
+    # Build a human-readable reason for the override
+    contextual_score = scores[contextual_lever]
+    override_reason = (
+        f"Bottleneck identified from context, not score. "
+        f"{contextual_lever} scores {contextual_score:.0f}/100 but is declining "
+        f"due to a contextual factor identified in the owner's diagnostic answers. "
+        f"Score-based bottleneck ({score_based_bottleneck} at "
+        f"{score_based_score:.0f}/100) is not the priority because the contextual "
+        f"event is actively constraining {contextual_lever}."
+    )
+    return (contextual_lever, override_reason)
+
+
+# ─────────────────────────────────────────────
 # Input validation
 # ─────────────────────────────────────────────
 
@@ -238,7 +334,21 @@ def calculate_all(data: dict) -> dict:
         'Margin':            margin_score,
     }
 
-    bottleneck = min(scores, key=scores.get)
+    # ── Score-based bottleneck ───────────────────────────────────────────
+    bottleneck_score_based = min(scores, key=scores.get)
+
+    # ── Contextual bottleneck override ───────────────────────────────────
+    diagnostic_answers = data.get('diagnostic_answers', '')
+    bottleneck_contextual, override_reason = detect_contextual_bottleneck(
+        diagnostic_answers, scores
+    )
+
+    if override_reason:
+        bottleneck    = bottleneck_contextual
+        context_override = True
+    else:
+        bottleneck    = bottleneck_score_based
+        context_override = False
 
     # ── Scenario planning (10% improvement per lever) ────────────────────
     scenarios = _build_scenarios(
@@ -268,7 +378,10 @@ def calculate_all(data: dict) -> dict:
         annual_net_profit, net_margin_pct,
         store_type, store_benchmark,
         customer_score, frequency_score, spend_score, margin_score,
-        bottleneck
+        bottleneck_score_based,
+        context_override=context_override,
+        bottleneck_contextual=bottleneck if context_override else '',
+        override_reason=override_reason,
     )
 
     return {
@@ -297,13 +410,16 @@ def calculate_all(data: dict) -> dict:
             'annual_net_profit':   annual_net_profit,
             'net_margin_pct':      net_margin_pct,
         },
-        'scores':          scores,
-        'bottleneck':      bottleneck,
-        'store_type':      store_type,
-        'store_benchmark': store_benchmark,
-        'scenarios':       scenarios,
-        'projections':     projections,
-        'scratchpad':      scratchpad,
+        'scores':                  scores,
+        'bottleneck':              bottleneck,
+        'bottleneck_score_based':  bottleneck_score_based,
+        'context_override':        context_override,
+        'context_override_reason': override_reason,
+        'store_type':              store_type,
+        'store_benchmark':         store_benchmark,
+        'scenarios':               scenarios,
+        'projections':             projections,
+        'scratchpad':              scratchpad,
         # Raw inputs (for display)
         'inputs': {
             'customers':      customers,
@@ -504,7 +620,11 @@ def _build_scratchpad(
     annual_net_profit, net_margin_pct,
     store_type, store_benchmark,
     customer_score, frequency_score, spend_score, margin_score,
-    bottleneck
+    bottleneck,
+    *,
+    context_override: bool = False,
+    bottleneck_contextual: str = '',
+    override_reason: str = '',
 ) -> list[str]:
     """
     Build a list of human-readable scratchpad lines showing every
@@ -547,6 +667,22 @@ def _build_scratchpad(
         f"frequency_score = MIN(100, ROUND(({frequency:.2f} ÷ 3.0) × 100, 0)) = {frequency_score:.0f}",
         f"spend_score = MIN(100, ROUND((${avg_spend:.2f} ÷ ${store_benchmark:.2f}) × 100, 0)) = {spend_score:.0f}",
         f"margin_score = MIN(100, ROUND(({gross_margin_pct*100:.2f}% ÷ 50%) × 100, 0)) = {margin_score:.0f}",
-        f"bottleneck = {bottleneck} (lowest score)",
+        f"bottleneck (score-based) = {bottleneck} (lowest score)",
     ]
+
+    if context_override and bottleneck_contextual:
+        lines += [
+            "",
+            "--- CONTEXTUAL BOTTLENECK OVERRIDE ---",
+            "context_override = True",
+            f"bottleneck_contextual = {bottleneck_contextual}",
+            f"override_reason = {override_reason}",
+        ]
+    else:
+        lines += [
+            "",
+            "--- CONTEXTUAL BOTTLENECK OVERRIDE ---",
+            "context_override = False  (score-based bottleneck retained)",
+        ]
+
     return lines
